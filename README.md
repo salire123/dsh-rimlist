@@ -1,160 +1,182 @@
 # dsh-rimlist
 
-在 DeepSeek Harness 里管理 RimWorld mod。它是一个"RimSort 式"的双栏加载顺序管理器，带规则库排序、诊断、游戏日志分析、Mod 更新日志 / 备份回滚 / Git 安装，以及 22 个 AI 工具。mod 列表可以和其他玩家互相分享。
+**English** | [简体中文](README.zh-CN.md)
 
-入口在 DSH **右侧栏的 RimWorld Mods 标签**。
+> **AI-generated notice**: All code, tests, tutorials and documentation in this project were written by AI, using **claude-opus-5-5** and **DeepSeek 4.1 Flash**. The author provided the requirements, testing and review. Evaluate it yourself before relying on it; it backs up `ModsConfig.xml` before every write, but keep your own backups too.
 
-## 界面
+A RimWorld mod manager inside DeepSeek Harness (DSH). It is a RimSort-style two-column load-order manager with rule-database sorting, diagnostics, game-log analysis, reading mod lists from save files, mod changelogs / backup and rollback / installing from Git, and 32 AI tools. Mod lists can be shared with other players.
 
-| 位置 | 内容 |
+Open it from the **RimWorld Mods tab in the DSH right sidebar**.
+
+![dsh-rimlist UI](img/dsh-rimlist.png)
+
+## Interface
+
+| Area | Contents |
 | --- | --- |
-| 顶栏 | ⇅ 排序 · ↻ 刷新 · ▶ 启动游戏 · 📄 日志 · ⚙ 设置 · 保存到游戏 |
-| 左栏 | 未启用的 mod（搜索，按 全部 / 工坊 / 本地 / 官方 筛选） |
-| 中栏 | 已启用的 mod，也就是当前加载顺序 |
-| 右栏 | 详情 · 诊断 · 列表 · 规则 · 版本（带数量角标），以及日志、设置。只有当前标签显示文字，其他只显示图标 |
+| Top bar | ⇅ Sort · ↻ Refresh · ▶ Launch game · ⚡ Quick test · 📄 Log · ⚙ Settings · Save to game |
+| Left column | Inactive mods (search; filter by All / Workshop / Local / Official, and by tag) |
+| Middle column | Active mods, i.e. the current load order |
+| Right column | Details · Diagnostics · Lists · Rules · Versions · Saves (with count badges), plus Log and Settings. Only the current tab shows its label; the others show an icon |
 
-侧栏较窄时会自动切换成单栏，用顶部的「未启用 / 已启用 / 面板」按钮切换视图。
+When the sidebar is narrow it switches to a single column; use the Inactive / Active / Panel buttons at the top to switch views.
 
-## 功能
+## Features
 
-### 加载顺序
-- **扫描**：覆盖 Core / DLC、本地 `Mods/` 和 Steam 创意工坊（含多个 Steam 库）。
-- **拖拽排序**：
-  - 可以在两栏之间互相拖动，也可以多选（Ctrl / Shift）。
-  - 支持置顶 / 置底。快捷键：`↑`/`↓` 选择（`Shift` 多选，`Home`/`End`/`PageUp`/`PageDown` 跳转），`Alt+↑`/`Alt+↓` 上下移动已启用的 Mod，`Delete` 停用，`Enter` 启用，`Ctrl+S` 保存。
-- **详情**：大预览图（点击放大）、作者、版本、依赖、规则、工坊链接。
+### Load order
+- **Scan**: Core / DLC, the local `Mods/` folder and the Steam Workshop (including multiple Steam libraries).
+- **Drag and drop**:
+  - Drag between the two columns; multi-select with Ctrl / Shift.
+  - Move to top / bottom. Keys: `↑`/`↓` select (`Shift` extends, `Home`/`End`/`PageUp`/`PageDown` jump), `Alt+↑`/`Alt+↓` move an active mod, `Delete` deactivates, `Enter` activates, `Ctrl+S` saves.
+- **Details**: large preview (click to zoom), author, version, dependencies, rules, workshop link, personal note.
 
-### 排序
-点一次「⇅ 排序」即可。约束来源的优先级从高到低是：
+### Sorting
+Click "⇅ Sort" once. Constraint sources, from highest to lowest priority:
 
-**强制（forceLoad + 官方 DLC 顺序）> 自定义规则 > About.xml > 社区规则 > modDependencies > 最低优先级**
+**Forced (forceLoad + official DLC order) > user rules > About.xml > community rules > modDependencies > tie-break**
 
-最低优先级决定"没有任何规则约束的 mod 之间怎么排"。在 ⚙ 设置 → 排序 里选择：
+The tie-break decides how mods with no constraint between them are ordered. Choose it in ⚙ Settings → Sorting:
 
-| 模式 | 说明 |
+| Mode | Description |
 | --- | --- |
-| 按名称（默认） | 按优先级排序，同等情况下按字母排（数字按自然顺序，Mod 9 在 Mod 10 前） |
-| 保持当前顺序 | 只移动必须移动的 mod |
-| RimSort 兼容 | 完整复刻 RimSort 的 Topological 算法：分层（Core/Harmony → 13 个内置框架 → 普通 → loadBottom），每层逐级拓扑，同级按名称排 |
+| By name (default) | Priority-aware sort, ties broken alphabetically (natural number order: Mod 9 before Mod 10) |
+| Keep current order | Only moves mods that have to move |
+| RimSort compatible | A port of RimSort's Topological algorithm: tiers (Core/Harmony → 13 built-in frameworks → regular → loadBottom), level-by-level toposort per tier, ties by name |
 
-遇到规则冲突（环）时，RimSort 会直接拒绝排序；这里会丢掉优先级最低的那条规则，然后在诊断里报告。
+On a rule conflict (a cycle) RimSort refuses to sort; here the lowest-priority rule in the cycle is dropped and reported in diagnostics.
 
-### 规则库（和 RimSort 用同样的五个，来源可配置）
-每个库可以选：不使用 / GitHub / 任意 URL（raw、.gz 或仓库 .zip）/ 本地文件。本地文件可以直接指向已安装 RimSort 的 `~/.local/share/RimSort/dbs/…`。
+### Rule databases (the same five as RimSort, configurable sources)
+Each database can be: none / GitHub / any URL (raw file, .gz or repo .zip) / local file. A local file can point straight at an existing RimSort data folder (e.g. `~/.local/share/RimSort/dbs/…`).
 
-- [RimSort/Community-Rules-Database](https://github.com/RimSort/Community-Rules-Database)：loadAfter / loadBefore / loadTop / loadBottom / incompatibleWith
-- [RimSort/Steam-Workshop-Database](https://github.com/RimSort/Steam-Workshop-Database)：工坊页上声明的依赖、名称、版本
-- [emipa606/NoVersionWarning](https://github.com/emipa606/NoVersionWarning)：没标注当前版本、但确认可用的 mod
-- [emipa606/UseThisInstead](https://github.com/emipa606/UseThisInstead)：停更 mod 的接替版本，诊断里可以一键跳转
-- [bukforks/rimworld-versions](https://github.com/bukforks/rimworld-versions)：RimWorld 版本历史
+- [RimSort/Community-Rules-Database](https://github.com/RimSort/Community-Rules-Database): loadAfter / loadBefore / loadTop / loadBottom / incompatibleWith
+- [RimSort/Steam-Workshop-Database](https://github.com/RimSort/Steam-Workshop-Database): dependencies, names and versions declared on workshop pages
+- [emipa606/NoVersionWarning](https://github.com/emipa606/NoVersionWarning): mods that do not list the current version but are known to work
+- [emipa606/UseThisInstead](https://github.com/emipa606/UseThisInstead): replacements for abandoned mods, one click from diagnostics
+- [bukforks/rimworld-versions](https://github.com/bukforks/rimworld-versions): RimWorld version history
 
-下载后缓存在 `~/.dsh/rimlist/db/`，默认 7 天刷新一次，离线时继续用缓存。
+Downloads are cached in `~/.dsh/rimlist/db/` and refreshed every 7 days by default; the cache is used when offline.
 
-### 自定义规则（优先级高于社区库）
-社区库对新 mod、小众 mod 的规则经常缺失或出错，可以在这里补上：
-- **固定当前顺序**：在已启用栏多选几个 mod，把它们当前的相对顺序一键保存成规则，以后排序都会保持这个顺序。
-- **忽略不兼容**：诊断里遇到误报的"不兼容"，可以一键忽略（存为 `ignoreIncompatible` 规则）。
-- 手动添加 loadAfter / loadBefore / incompatibleWith / loadTop / loadBottom。
-- 导入 / 导出 RimSort 格式的 `userRules.json`。
-- 每条规则都标明来源（自定义 / 社区 / About.xml），覆盖社区规则时会提示。
+### User rules (override the community database)
+The community database is often missing or wrong for new and niche mods. Fill the gaps here:
+- **Pin current order**: multi-select several active mods and save their current relative order as rules; future sorts keep it.
+- **Ignore incompatibility**: dismiss a false "incompatible" report with one click (stored as an `ignoreIncompatible` rule).
+- Add loadAfter / loadBefore / incompatibleWith / loadTop / loadBottom by hand.
+- Import / export RimSort-format `userRules.json`.
+- Every rule shows its source (user / community / About.xml); you are warned when a user rule overrides a community rule.
 
-### 诊断
-- 依赖缺失或未启用：可以一键启用，或跳转到 Steam 订阅。
-- 版本不匹配（会参考 NoVersionWarning）、不兼容、顺序违规、重复安装。
-- 有接替版本可用时会提示（UseThisInstead）。
+### Diagnostics
+- Missing or inactive dependencies: activate with one click, or jump to Steam to subscribe.
+- Version mismatches (consulting NoVersionWarning), incompatibilities, order violations, duplicate installs.
+- Suggests a replacement when one exists (UseThisInstead).
 
-### 列表（和其他玩家分享）
-- 保存为命名列表。
-- 导入：支持粘贴、URL（GitHub raw / Gist / rentry / pastebin）、文件。格式包括 rimlist JSON、`ModsConfig.xml`、纯 packageId、Markdown 表格、工坊链接和 RimSort 导出的文本。
-- 导出：rimlist JSON、`ModsConfig.xml`（兼容 RimSort / RimPy）、packageId、Markdown。
-- 可以和当前顺序对比，以替换或合并的方式应用。
+### Lists (share with other players)
+- Save named lists. Each mod remembers where it came from (workshop id, or git URL + branch).
+- Import by paste, URL (GitHub raw / Gist / rentry / pastebin) or file. Formats: rimlist JSON, `ModsConfig.xml`, plain packageIds, Markdown tables, workshop links and RimSort text exports.
+- Export as rimlist JSON, `ModsConfig.xml` (RimSort / RimPy compatible), packageIds or Markdown.
+- Compare with the current order and apply by replacing or merging; fetch missing mods in one step (git mods are cloned, workshop mods open their subscribe page).
 
-### 启动游戏
-- 点 ▶ 按钮启动，默认启动前自动保存。
-- 在 ⚙ 设置 → 启动游戏 里选择启动方式：
-  - **Steam**：`steam://rungameid/294100`，或填 Steam 路径，用 `-applaunch` 传参。
-  - **直接运行**：自动找 `RimWorldLinux` / `RimWorldWin64.exe` / `RimWorldMac.app`。
-  - **自定义程序**：任意命令，例如 flatpak、Proton、脚本。
-- 可以附加游戏参数，也能预览实际执行的命令。
+### Saves
+- The Saves tab lists `*.rws` save files (name, date, game version, mod count).
+- Reads the mod list stored in a save, marks mods that are not installed, and diffs it against the current load order.
+- Import a save's mod list as a named list, then apply it or fetch the missing mods. Save files are only read, never modified.
 
-### 游戏日志
-- 点 📄 日志 打开 `Player.log` 查看器。游戏写入新日志时自动刷新（每 3 秒检查一次）。
-- 过滤掉 Unity 噪音；相同报错合并显示为 `×次数`，例如 95 条 KyberCrystal 只显示一条。
-- 每条报错旁标出相关 mod，点击跳转到该 mod。可以展开堆栈，按关键字筛选，也能查看上一次运行的日志。
-- **发给 AI 分析**：把去重后的摘要放进对话输入框。如果插入失败就复制到剪贴板，之后粘贴即可。
+### Launching the game
+- Click ▶ to launch; the load order is saved first by default. "⚡ Quick test" adds `-quicktest`, which skips the main menu and generates a small map, a fast way to check that a mod list loads.
+- Choose the launch method in ⚙ Settings → Launch:
+  - **Steam**: `steam://rungameid/294100`, or set the Steam path to pass arguments via `-applaunch`.
+  - **Direct**: finds `RimWorldLinux` / `RimWorldWin64.exe` / `RimWorldMac.app` automatically.
+  - **Custom**: any command, e.g. flatpak, Proton or a script.
+- Add extra game arguments and preview the exact command; check whether the game is running and close it.
 
-### Mod 更新日志、备份与回滚
-Steam 创意工坊**不能回退版本**：作者一更新，旧版本就被覆盖了。右栏「版本」标签和每个 mod 详情里的「更新日志 & Mod 备份」解决这个问题：
-- **最近更新**：按 1 / 7 / 30 / 90 天列出更新过的 mod（数据来自 Steam 的 `appworkshop_294100.acf`，安装 RimList 之前的更新也查得到），展开即可看更新说明。Steam 还没下载完的更新会标成「待更新」。
-- **更新日志**：工坊 mod 从 Steam 更新日志页抓取并缓存，标出「当前已安装」和「比你新」的版本；git mod 显示提交记录。
-- **备份**：把整个 mod 文件夹复制到 `~/.dsh/rimlist/modbackups/`，同一版本只存一份，每个 mod 默认保留 3 份。可以手动备份，也可以一键备份所有已启用的工坊 mod，或者开启**自动备份**（每次扫描都把当前版本存一份）。
-- **回滚**：把备份装进本地 `Mods/`，文件夹名为 `<原名>_rimlist_<版本>`。RimWorld 对同一个 packageId 会优先加载本地副本，所以之后 Steam 再更新也不会影响它。想回到工坊版本时，点「移除本地副本」（删除前会再自动备份一次）。
+### Game log
+- 📄 Log opens a `Player.log` viewer that refreshes while the game writes to it (checked every 3 seconds).
+- Unity noise is filtered out; identical errors collapse into one line with `×count` (e.g. 95 KyberCrystal errors show as one).
+- Each error names the related mod; click to jump to it. Expand stack traces, filter by keyword, or view the previous run's log.
+- **Send to AI**: puts a de-duplicated summary into the chat input; if that fails it is copied to the clipboard.
 
-### 从 Git 安装 / 更新 Mod
-- 「版本 → Git」：输入 `https://github.com/owner/repo`、ssh 地址，或者只写 `owner/repo`，可选分支，会 clone 到本地 `Mods/`，可选装完立即启用。
-- **检查更新**：`git fetch` 后显示落后几个提交以及每个提交的说明。点 **git pull**（`--ff-only`）更新，更新前自动备份，更新出问题可以回滚。
-- 只接受 http(s) / ssh / git 地址，拒绝本地路径和以 `-` 开头的参数（防止参数注入）。需要本机已安装 `git`。
+### Mod changelogs, backup and rollback
+The Steam Workshop **cannot roll back**: once an author updates, the old version is gone. The Versions tab and "Changelog & Mod backup" in each mod's details address this:
+- **Recent updates**: mods updated in the last 1 / 7 / 30 / 90 days (from Steam's `appworkshop_294100.acf`, so updates from before RimList was installed are included); expand to read the notes. Updates Steam has not finished downloading are marked "pending".
+- **Changelog**: workshop changelogs are fetched from Steam and cached, marking the installed version and newer ones; git mods show their commit log.
+- **Backup**: copies the whole mod folder to `~/.dsh/rimlist/modbackups/`, one copy per version, 3 kept per mod by default. Back up by hand, back up all active workshop mods at once, or turn on **auto backup** (each scan stores the current version).
+- **Rollback**: installs a backup into the local `Mods/` folder as `<name>_rimlist_<version>`. RimWorld prefers a local copy of the same packageId, so later Steam updates do not affect it. To go back to the workshop version, click "Remove local copy" (it is backed up once more first).
 
-### Mod 类型检查（AI 标签）
-- 在 mod 详情里点击「检查类型」。程序会读取 `About.xml` 描述、Defs、Patches、Languages、贴图、LoadFolders 以及 DLL/Harmony 补丁目标，然后给出分类。
-- 输出不止一个标签：`primary_type`（只能有一个）+ `secondary_types` + `feature_tags`，另外还有 `display_tags_zh`、`is_content_mod / is_library / is_patch / is_translation`、`confidence`、`evidence`。
-- 类型有：`content` 内容、`library` 前置/框架、`patch` 补丁/兼容、`translation` 翻译、`performance` 性能、`ui` 界面、`qol` 生活改善、`utility` 工具。
-- 依据优先引用原文短句；文件结构也会作为证据，例如「Patches: 22 个 PatchOperation」「Harmony 补丁原版界面: FloatMenu…」。
-- 自动结果按 mod 版本缓存在 `~/.dsh/rimlist/modTags.json`。AI 复核后可以用 `rimlist_classify_save_ai` 保存校正，界面会显示「AI 已校正」。
-- 两栏搜索框旁有「按标签筛选」下拉；详情页「✎ 编辑标签」可增删标签（显示「手动标签」，「↺ 恢复自动」可撤销）。
+### Install / update mods from Git
+- Versions → Git: enter `https://github.com/owner/repo`, an ssh URL or just `owner/repo`, optionally a branch; it is cloned into the local `Mods/` folder and can be activated right away.
+- **Check for updates**: runs `git fetch` and shows how many commits behind you are, with their messages. **git pull** (`--ff-only`) updates, taking a backup first so you can roll back.
+- Only http(s) / ssh / git URLs are accepted; local paths and arguments starting with `-` are rejected (prevents argument injection). Requires `git` to be installed.
 
-### 安全写入
-- 每次保存前，先把 `ModsConfig.xml` 备份到 `~/.dsh/rimlist/backups/`。可以在设置里一键恢复。
-- packageId 一律写成**小写**。RimWorld 在这里区分大小写，混用大小写会导致游戏里同一个 mod 同时出现在两栏、显示为灰色，并且实际不生效。
+### Mod type check (AI tags)
+- Click "Check type" in a mod's details. It reads the `About.xml` description, Defs, Patches, Languages, textures, LoadFolders and DLL/Harmony patch targets, then classifies the mod.
+- Output is more than one tag: `primary_type` (exactly one) + `secondary_types` + `feature_tags`, plus `display_tags_zh`, `is_content_mod / is_library / is_patch / is_translation`, `confidence` and `evidence`.
+- Types: `content`, `library` (dependency/framework), `patch` (patch/compatibility), `translation`, `performance`, `ui`, `qol` (quality of life), `utility`.
+- Evidence quotes the original text where possible; file structure counts too, e.g. "Patches: 22 PatchOperations", "Harmony patches vanilla UI: FloatMenu…".
+- Automatic results are cached per mod version in `~/.dsh/rimlist/modTags.json`. After an AI review, `rimlist_classify_save_ai` stores the correction and the UI shows "AI reviewed".
+- Both columns have a tag filter next to the search box; "✎ Edit tags" in the details adds or removes tags (shown as "manual tags"; "↺ Restore auto" undoes it).
 
-## AI 工具
+### Mod notes
+- Write a personal note for any mod (compatibility issues, settings, why you use it or not). The AI takes these notes into account when answering questions about your mods.
 
-在对话里直接说，例如"帮我排序并修复缺失依赖"、"看看游戏日志为什么报红"、"昨天更新了哪些 mod，把 XX 回滚到上个版本"，AI 会自动调用下面的工具：
+### Safe writes
+- `ModsConfig.xml` is backed up to `~/.dsh/rimlist/backups/` before every save and can be restored from Settings.
+- packageIds are always written in **lowercase**. RimWorld is case-sensitive here; mixed case makes the same mod appear in both columns, greyed out, and not actually load.
 
-| 工具 | 作用 |
+## AI tools
+
+To keep other conversations' context clean, the `rimlist_*` tools are hidden from the AI by default. Type **`/rimlist`** in a conversation to enable them for that session (they stay enabled after the session is resumed).
+
+Then just ask, e.g. "sort my mods and fix missing dependencies", "why is the game log full of red errors", "which mods updated yesterday? roll XX back to the previous version". The AI calls these tools:
+
+| Tool | Purpose |
 | --- | --- |
-| `rimlist_status` | 总览：游戏版本、路径、mod 数、规则库状态、诊断摘要 |
-| `rimlist_active` | 当前加载顺序 |
-| `rimlist_search` | 按名称 / packageId / 作者 / 工坊 ID 搜索已安装的 mod；也能按类型（`type`、`primaryOnly`）、标签（`tags`，英文 feature tag 或中文标签都行，必须全部命中）和最低可信度（`minConfidence`）筛选 |
-| `rimlist_mod` | 单个 mod 的完整信息（依赖、规则、Steam 数据） |
-| `rimlist_diagnose` | 检查加载顺序的问题 |
-| `rimlist_sort` | 计算排序结果（`tieBreak`: name / current / rimsort），`save=true` 时写入游戏 |
-| `rimlist_explain` | 解释某个 mod 为什么在这个位置（每条约束及其来源） |
-| `rimlist_set_active` | 启用 / 停用 / 移动 / 整体替换 |
-| `rimlist_rule` | 添加 / 删除自定义规则（含 ignoreIncompatible） |
-| `rimlist_pin_order` | 把几个 mod 的当前顺序固定为规则 |
-| `rimlist_databases` | 查看 / 配置 / 刷新五个规则库 |
-| `rimlist_lists` | 管理已保存的列表（保存 / 应用 / 对比 / 导出 / 删除） |
-| `rimlist_import` | 从文本或 URL 导入别人的 mod 列表 |
-| `rimlist_rescan` | 订阅或退订后重新扫描，可选强制刷新规则库 |
-| `rimlist_launch` | 启动游戏，或预览启动命令 |
-| `rimlist_game_log` | 读取 Player.log 摘要（去重、计数、关联 mod），用于排查红字 |
-| `rimlist_mod_updates` | 最近更新了哪些 mod，以及单个 mod 的工坊更新日志 / git 提交记录 |
-| `rimlist_mod_backup` | 备份 / 列出备份 / 回滚到旧版 / 移除本地副本 / 删除备份 |
-| `rimlist_git` | 从 git 安装 mod、检查更新、git pull |
-| `rimlist_classify` | 检查单个 mod 的类型：主类型、副类型、功能标签、可信度、原文依据 |
-| `rimlist_classify_all` | 批量分类全部 / 已启用的 mod（按版本缓存） |
-| `rimlist_classify_save_ai` | 保存 AI 复核后的分类，覆盖自动结果 |
-| `rimlist_set_tags` | 手动设置 Mod 的显示标签（`reset=true` 恢复自动） |
-| `rimlist_tag_review` | 让 AI 分批检查标签：当前标签 + 描述 + 文件信号（filter=auto/low/reviewed/all） |
-| `rimlist_reset_tags` | 把全部（或指定）手动 / AI 标签恢复成自动结果 |
-| `rimlist_game` | 查看游戏是否在运行 / 关闭游戏（force=true 强制结束） |
+| `rimlist_status` | Overview: game version, paths, mod counts, rule database status, diagnostics summary |
+| `rimlist_active` | Current load order |
+| `rimlist_search` | Search installed mods by name / packageId / author / workshop id; also filter by type (`type`, `primaryOnly`), tags (`tags`, English feature tags or Chinese display tags, all must match) and minimum confidence (`minConfidence`) |
+| `rimlist_mod` | Full details of one mod (dependencies, rules, Steam data) |
+| `rimlist_diagnose` | Check the load order for problems |
+| `rimlist_sort` | Compute a sorted order (`tieBreak`: name / current / rimsort); `save=true` writes it to the game |
+| `rimlist_explain` | Explain why a mod sits where it does (every constraint and its source) |
+| `rimlist_set_active` | Activate / deactivate / move / replace the whole list |
+| `rimlist_rule` | Add / remove user rules (including ignoreIncompatible) |
+| `rimlist_pin_order` | Pin the current order of several mods as rules |
+| `rimlist_databases` | Show / configure / refresh the five rule databases |
+| `rimlist_lists` | Manage saved lists (save / apply / install missing / compare / export / delete) |
+| `rimlist_import` | Import someone else's mod list from text or a URL |
+| `rimlist_saves` | List saves, show a save's mod list, import it as a list |
+| `rimlist_rescan` | Rescan after subscribing or unsubscribing; optionally force-refresh the rule databases |
+| `rimlist_launch` | Launch the game (optionally quicktest), or preview the launch command |
+| `rimlist_game` | Check whether the game is running / close it (force=true kills it) |
+| `rimlist_game_log` | Player.log summary (de-duplicated, counted, attributed to mods) for tracking down errors |
+| `rimlist_mod_updates` | Recently updated mods, and one mod's workshop changelog / git commit log |
+| `rimlist_mod_backup` | Back up / list backups / roll back / remove a local copy / delete a backup |
+| `rimlist_git` | Install mods from git, check for updates, git pull |
+| `rimlist_classify` | Classify one mod: primary type, secondary types, feature tags, confidence, quoted evidence |
+| `rimlist_classify_all` | Classify all / active mods in bulk (cached per version) |
+| `rimlist_classify_save_ai` | Save an AI-reviewed classification over the automatic one |
+| `rimlist_set_tags` | Set a mod's display tags by hand (`reset=true` restores automatic) |
+| `rimlist_tag_review` | Let the AI review tags in pages: current tags + description + file signals (filter=auto/low/reviewed/all) |
+| `rimlist_reset_tags` | Reset all (or selected) manual / AI tags to the automatic result |
+| `rimlist_get_note` | Read one mod's note |
+| `rimlist_set_note` | Set / remove one mod's note |
+| `rimlist_get_all_notes` | Read all mod notes |
+| `rimlist_debug_log` | Read the RimList debug log (last N lines) |
+| `rimlist_clear_debug_log` | Clear the RimList debug log |
 
-## 平台支持
+## Platform support
 
-支持 Linux、Windows 和 macOS，会自动探测：
-- Steam 库：包括 `libraryfolders.vdf` 里的额外库，以及 Linux 的 Flatpak / Snap 版 Steam。
-- 创意工坊目录。
-- `ModsConfig.xml` 和 `Player.log` 的位置：
-  - Linux：`~/.config/unity3d/Ludeon Studios/…`
-  - Windows：`%USERPROFILE%\AppData\LocalLow\Ludeon Studios\…`
-  - macOS：`~/Library/Application Support/RimWorld/Config`，日志在 `~/Library/Logs/…`
+Linux, Windows and macOS, with automatic detection of:
+- Steam libraries, including extra libraries in `libraryfolders.vdf` and Flatpak / Snap Steam on Linux.
+- The Workshop folder.
+- The location of `ModsConfig.xml` and `Player.log`:
+  - Linux: `~/.config/unity3d/Ludeon Studios/…`
+  - Windows: `%USERPROFILE%\AppData\LocalLow\Ludeon Studios\…`
+  - macOS: `~/Library/Application Support/RimWorld/Config`, logs in `~/Library/Logs/…`
 
-探测不到时，可以在设置里手动指定路径。
+If detection fails, set the paths by hand in Settings.
 
-## 安装
+## Installation
 
-在 DSH profile（如 `~/.dsh/profiles/desktop/package.json`）里加入依赖和 bundle：
+Add the dependency and bundle to your DSH profile (e.g. `~/.dsh/profiles/desktop/package.json`):
 
 ```json
 {
@@ -163,58 +185,69 @@ Steam 创意工坊**不能回退版本**：作者一更新，旧版本就被覆�
 }
 ```
 
-然后在 profile 目录执行 `pnpm install`，再重启 DSH。
+Run `pnpm install` in the profile folder, then restart DSH.
 
-> 注意：`file:` 依赖是**复制**过去的，不是软链接。修改源码后需要重新同步到 profile 的 `node_modules/dsh-rimlist`，或者重新执行 `pnpm install`。
-> 只改了前端（`src/client`）时，构建后刷新页面就能生效；改了宿主端（`index.js`、`src/host`）则必须重启 DSH。
+> Note: a `file:` dependency is **copied**, not symlinked. After changing the source, sync it to the profile's `node_modules/dsh-rimlist` again or re-run `pnpm install`.
+> Front-end-only changes (`src/client`) take effect after a build and a page refresh; host changes (`index.js`, `src/host`) need a DSH restart.
 
-## 开发
+## Development
 
 ```bash
-npm_config_cache=$PWD/.npm-cache npm install
-npm run build                 # 打包 src/client → lib/client.js（--no-minify 便于调试）
-npm test                      # node --test，28 个测试
-node scripts/dev-server.mjs   # http://127.0.0.1:4777/dev 独立调试（数据目录 .tmp-home/rimlist）
+npm install
+npm run build                 # bundle src/client → lib/client.js (build:dev skips minification)
+npm test                      # node --test
+node scripts/dev-server.mjs   # standalone debug page at http://127.0.0.1:4777/dev (data in .tmp-home/rimlist)
 ```
 
-调试页支持点击探针：`/dev?clicks=tab:<按钮 title>,text:<按钮文字前缀>,row:<mod 名>,click:<CSS 选择器>,measure:<CSS 选择器>`。执行结果写在页面的 `<pre id="probe">` 里，方便配合无头浏览器做自动检查。
+The debug page supports click probes: `/dev?clicks=tab:<button title>,text:<button text prefix>,row:<mod name>,click:<CSS selector>,measure:<CSS selector>`. Results are written to `<pre id="probe">` on the page, for automated checks with a headless browser.
 
-## 目录结构
+`tutorial/` contains a Chinese tutorial (HTML) that goes from JavaScript basics through this plugin's scanning, sorting, rules, service layer and front end.
+
+## Layout
 
 ```text
-index.js              宿主插件入口：HTTP 接口 POST /api/rimlist + 19 个 AI 工具
+index.js              Host plugin entry: HTTP endpoint POST /api/rimlist + 32 AI tools
 src/host/
-  service.js          所有业务方法（扫描、排序、写入、列表、规则、启动、日志）
-  sorter.js           排序与诊断（优先级排序 + RimSort Topological 复刻）
-  rules.js            五个规则库 + 自定义规则
-  scan.js / xml.js    扫描 mod、解析 About.xml / ModsConfig.xml
-  paths.js            三平台路径探测
-  launch.js           启动游戏
-  gamelog.js          Player.log 解析、去重、mod 归因、摘要
-  modversions.js      工坊 acf / 更新日志抓取、mod 备份与回滚、git 安装与更新
-  classify.js         mod 类型分类：结构扫描、规则打分、证据、AI 校正存储
-  lists.js            列表存储、导入导出
-  archive.js          无依赖的 gzip / zip 读取
-src/client/           React 前端（右侧栏标签）
+  service.js          All service methods (scan, sort, write, lists, rules, launch, logs)
+  sorter.js           Sorting and diagnostics (priority sort + RimSort Topological port)
+  rules.js            The five rule databases + user rules
+  scan.js / xml.js    Scan mods, parse About.xml / ModsConfig.xml
+  paths.js            Path detection on three platforms
+  launch.js           Launch the game, open workshop pages
+  process.js          Detect / stop the game process
+  gamelog.js          Player.log parsing, de-duplication, mod attribution, summary
+  saves.js            Read the mod list stored in save files
+  modversions.js      Workshop acf / changelog fetching, mod backup and rollback, git install and update
+  classify.js         Mod type classification: structure scan, rule scoring, evidence, AI override store
+  lists.js            List storage, import and export
+  archive.js          Dependency-free gzip / zip reader
+  toolgate.js         Hides the tools from the AI until /rimlist is typed
+  skill.js            Registers the bundled skill (skills/rimlist/SKILL.md)
+  logger.js           Debug log
+src/client/           React front end (sidebar tab)
 ```
 
-## 数据目录
+## Data folder
 
-位于 `$DSH_HOME/rimlist/`（默认 `~/.dsh/rimlist/`）：
+Stored in `$DSH_HOME/rimlist/` (default `~/.dsh/rimlist/`):
 
-| 文件 | 内容 |
+| File | Contents |
 | --- | --- |
-| `settings.json` | 路径、规则库来源、排序模式、启动方式、自动备份 |
-| `userRules.json` | 自定义规则（RimSort 格式） |
-| `lists/*.json` | 已保存的列表 |
-| `db/` | 规则库缓存 |
-| `backups/` | `ModsConfig.xml` 的历史备份 |
-| `modbackups/` | mod 文件夹快照（用于回滚） |
-| `modHistory.json` | 每个 mod 的版本记录（用于本地 / git mod 的更新历史） |
-| `changelogs/` | 工坊更新日志缓存 |
+| `settings.json` | Paths, rule database sources, sort mode, launch method, auto backup |
+| `userRules.json` | User rules (RimSort format) |
+| `lists/*.json` | Saved lists |
+| `db/` | Rule database cache |
+| `backups/` | `ModsConfig.xml` backups |
+| `modbackups/` | Mod folder snapshots (for rollback) |
+| `modHistory.json` | Per-mod version history (update history for local / git mods) |
+| `modTags.json` | Classification cache and manual / AI tags |
+| `changelogs/` | Workshop changelog cache |
+| `debug.log` | Debug log |
 
-## 许可证
+## License
 
-本项目以 [GNU GPL v3.0 或更高版本](LICENSE)（`GPL-3.0-or-later`）发布。
+Released under the [GNU GPL v3.0 or later](LICENSE) (`GPL-3.0-or-later`).
 
-`src/host/sorter.js` 中的 `sortRimSort`（`tieBreak: 'rimsort'` 模式）移植自 [RimSort](https://github.com/RimSort/RimSort) 的 Topological 排序算法，RimSort 以 GPL-3.0 许可发布。规则库数据由各自的仓库在运行时下载，版权归原作者所有。
+`sortRimSort` in `src/host/sorter.js` (the `tieBreak: 'rimsort'` mode) is a port of the Topological sort from [RimSort](https://github.com/RimSort/RimSort), which is licensed under GPL-3.0. Rule database data is downloaded at runtime from the respective repositories and remains the property of its authors.
+
+RimWorld is a trademark of Ludeon Studios. This project is not affiliated with Ludeon Studios, Valve or the RimSort project.
