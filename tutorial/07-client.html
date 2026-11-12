@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>7 · 前端 React · RimList 代码导读</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="side">
+  <div class="brand">
+    <b>RimList 代码导读</b>
+    <span>写给会一点 Python 的人</span>
+  </div>
+  <a href="index.html">0 · 先看这里</a>
+  <a href="01-js.html">1 · JS 速通</a>
+  <a href="02-entry.html">2 · 入口 index.js</a>
+  <a href="03-scan.html">3 · 扫描 mod</a>
+  <a href="04-sort.html">4 · 排序与诊断</a>
+  <a href="05-rules.html">5 · 规则库与列表</a>
+  <a href="06-service.html">6 · service.js</a>
+  <a href="07-client.html" class="on">7 · 前端 React</a>
+  <a href="08-hands-on.html">8 · 动手改与测试</a>
+  <div class="side-foot">
+    文件：<code>src/client/</code> 10 个文件，约 2800 行。<br>
+    这一页讲清楚 React 的三个概念，剩下的都是重复劳动。
+  </div>
+</nav>
+
+<main>
+
+<div class="kicker">第 7 页 · 界面</div>
+
+<h1>
+  前端 React
+  <span class="sub">如果你只想改算法，这页可以跳过。但如果你想改界面，React 的三个概念必须先懂：组件、状态、渲染。</span>
+</h1>
+
+<div class="note">
+  <b>React 是什么，一句话</b>
+  <p>你写一个函数，输入是数据，输出是"界面长什么样"的描述。<b>数据变了，React 自动重新调用你的函数，把界面更新掉。</b></p>
+  <p>你永远不写"找到那个 DOM 元素然后改它的文字"。你只描述"应该是什么样"，剩下的交给 React。这是和 jQuery 那类写法最根本的区别。</p>
+</div>
+
+<h2>核心概念①：组件就是一个返回 JSX 的函数</h2>
+
+<div class="filename">src/client/columns.jsx:44-52</div>
+<pre><code>export function TagFilter({ allTags, tag, setTag, tagIndex }) {
+  return (
+    &lt;select className="rl-select rl-tag-select" value={tag} onChange={(e) =&gt; setTag(e.target.value)} title={t('filterByTag')} disabled={!tagIndex}&gt;
+      &lt;option value=""&gt;{tagIndex ? t('allTags') : t('tagsLoading')}&lt;/option&gt;
+      {allTags.map(([g, n]) =&gt; &lt;option key={g} value={g}&gt;{g} ({n})&lt;/option&gt;)}
+    &lt;/select&gt;
+  )
+}</code></pre>
+
+<p>拆解：</p>
+
+<div class="kv">
+  <div><span class="k">函数名大写</span><span class="v"><code>TagFilter</code> —— <b>React 约定：组件名必须大写开头</b>。小写的会被当成普通 HTML 标签。</span></div>
+  <div><span class="k"><code>{ allTags, tag, ... }</code></span><span class="v">参数是一个对象，直接解构出各个"prop"（属性）。调用时是 <code>&lt;TagFilter allTags={x} tag={y} /&gt;</code>。</span></div>
+  <div><span class="k">返回 JSX</span><span class="v">外观像 HTML，实际是函数调用。注意 <code>className</code>、<code>onChange</code>。</span></div>
+  <div><span class="k"><code>{表达式}</code></span><span class="v">花括号里可以放任何 JS 表达式。<code>{tagIndex ? ... : ...}</code> 是三元，<code>{allTags.map(...)}</code> 是循环。</span></div>
+</div>
+
+<h3>用 map 生成列表（React 里唯一的循环方式）</h3>
+
+<p>上面那个 <code>{allTags.map(([g, n]) =&gt; &lt;option key={g} ...&gt;...&lt;/option&gt;)}</code> 值得单独讲：</p>
+
+<pre><code>{allTags.map(([g, n]) =&gt; &lt;option key={g} value={g}&gt;{g} ({n})&lt;/option&gt;)}</code></pre>
+
+<div class="kv">
+  <div><span class="k"><code>(tag, count)</code></span><span class="v"><code>allTags</code> 是 <code>[['工具', 12], ['界面', 5]]</code> 这样的二元组数组。<code>[g, n]</code> 是数组解构。</span></div>
+  <div><span class="k"><code>key={g}</code></span><span class="v"><b>必须有！</b>React 用它识别"哪个元素是哪个"。没有 key 会警告，而且列表重排时可能出错。</span></div>
+  <div><span class="k">没有 for 循环</span><span class="v">JSX 里不能写 <code>for</code>。<b>只能用 <code>.map()</code></b>（返回数组）或 <code>&amp;&amp;</code>（条件渲染）。</span></div>
+</div>
+
+<div class="tip">
+  <b>和 Python 模板引擎的对比</b>
+  <p>Jinja2 里你会写 <code>{% for tag, n in all_tags %}</code>。React 因为就是 JS，所以直接用 <code>.map()</code> —— 没有额外的模板语法要学。</p>
+</div>
+
+<h2>核心概念②：状态（state）</h2>
+
+<p>这是 React 唯一真正需要"理解"的东西。</p>
+
+<div class="filename">src/client/store.js:6-14</div>
+<pre><code>export function useRimlist() {
+  const [snap, setSnap] = useState(null)
+  const [error, setError] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [toast, setToast] = useState(null)
+  const [draft, setDraft] = useState(null)
+  const [diag, setDiag] = useState(null)
+  const toastTimer = useRef(null)</code></pre>
+
+<p><code>useState</code> 返回一个<b>二元组</b>：当前值 + 修改函数。用数组解构取出来。</p>
+
+<pre><code>const [count, setCount] = useState(0)
+<span class="c">//    ↑当前值   ↑改它的函数     ↑初始值</span>
+
+setCount(5)              <span class="c">// 改成 5,界面自动重画</span>
+setCount(c =&gt; c + 1)     <span class="c">// 基于旧值改（推荐，防并发问题）</span></code></pre>
+
+<div class="warn">
+  <b>绝对不要直接改状态变量</b>
+  <pre><code>snap.mods = newMods        <span class="c">// ✗ 界面不会更新！</span>
+setSnap(newMods)           <span class="c">// ✓ 这样才会</span></code></pre>
+  <p>原因：React 靠"引用变了吗"来判断要不要重画。<code>snap.mods = x</code> 改的是对象内容，<code>snap</code> 还是原来那个对象，React 看不出来。<b>这就是第 1 页讲 <code>{...old, key: value}</code> 不可变更新的原因。</b></p>
+</div>
+
+<h3>这个项目的状态设计</h3>
+
+<div class="filename">src/client/store.js:11-12（注释很关键）</div>
+<pre><code><span class="c">// Local (unsaved) active order; null means "same as snapshot.active".</span>
+const [draft, setDraft] = useState(null)</code></pre>
+
+<div class="note">
+  <b>一个状态，两个含义 —— 这是个很聪明的设计</b>
+  <p><code>draft</code> 只有两种可能：</p>
+  <ul>
+    <li><b><code>null</code></b> = "没有未保存的改动，显示服务器给的顺序"</li>
+    <li><b>一个数组</b> = "用户改过了，显示这个"</li>
+  </ul>
+  <p>所以 <code>active</code> 的定义是：</p>
+  <pre><code>const active = draft || snap?.active || []</code></pre>
+  <p>（<code>store.js:39</code>）一个 <code>||</code> 就解决了"有没有草稿"的分支。不用额外的 <code>isDirty</code> 布尔变量，避免了"<code>isDirty</code> 和 <code>draft</code> 不一致"这种经典 bug。</p>
+</div>
+
+<div class="filename">src/client/store.js:40</div>
+<pre><code>const dirty = draft !== null &amp;&amp; JSON.stringify(draft) !== JSON.stringify(snap?.active || [])</code></pre>
+
+<p>两个条件：有草稿，<b>且</b>草稿和服务器的不一样。用 <code>JSON.stringify</code> 比内容（因为数组不能直接 <code>===</code> 比较）。</p>
+
+<h2>核心概念③：副作用（useEffect）</h2>
+
+<p>有些事不是"渲染界面"，而是"要做点什么"：发请求、设定时器、加事件监听。这些放进 <code>useEffect</code>。</p>
+
+<div class="filename">src/client/store.js:22-36</div>
+<pre><code>const refresh = useCallback(async () =&gt; {
+  try {
+    const s = await api('snapshot')
+    setSnap(s)
+    setDiag(s.diagnostics)
+    setError(null)
+    return s
+  } catch (e) {
+    setError(e.message)
+  }
+}, [])
+
+useEffect(() =&gt; {
+  refresh()
+}, [refresh])</code></pre>
+
+<p>结构是 <code>useEffect(函数, 依赖数组)</code>：</p>
+
+<table>
+  <thead><tr><th>写法</th><th>什么时候跑</th></tr></thead>
+  <tbody>
+    <tr><td><code>useEffect(fn, [])</code></td><td>只在<b>第一次渲染后</b>跑一次（相当于 init）</td></tr>
+    <tr><td><code>useEffect(fn, [a, b])</code></td><td><code>a</code> 或 <code>b</code> 变了就跑</td></tr>
+    <tr><td><code>useEffect(fn)</code></td><td>每次渲染后都跑（很少用）</td></tr>
+    <tr><td><code>return () =&gt; {...}</code></td><td>清理函数，组件卸载或下次跑之前调用</td></tr>
+  </tbody>
+</table>
+
+<h3>一个带清理的例子</h3>
+
+<div class="filename">src/client/app.jsx:71-80（轮询游戏是否在运行）</div>
+<pre><code>const [running, setRunning] = useState(false)
+useEffect(() =&gt; {
+  let alive = true
+  const poll = () =&gt; api('gameStatus').then((r) =&gt; alive &amp;&amp; setRunning(!!r?.running)).catch(() =&gt; {})
+  poll()
+  const id = setInterval(poll, 4000)
+  return () =&gt; {
+    alive = false
+    clearInterval(id)
+  }
+}, [])</code></pre>
+
+<div class="kv">
+  <div><span class="k"><code>setInterval(poll, 4000)</code></span><span class="v">每 4 秒查一次游戏在不在跑。这样界面上"启动 / 停止"按钮能自动切换。</span></div>
+  <div><span class="k"><code>return () =&gt; {...}</code></span><span class="v"><b>清理函数。</b>组件被移除时必须停掉定时器，否则会一直跑（内存泄漏）。</span></div>
+  <div><span class="k"><code>alive</code> 标志</span><span class="v">防止"请求发出去了，组件已经卸载了，回来时 setState 报错"。这是 React 里非常经典的坑，用闭包变量解决。</span></div>
+</div>
+
+<div class="warn">
+  <b>依赖数组的坑</b>
+  <p>上面那个 <code>[]</code> 意思是"永远不重跑"。如果写成 <code>[running]</code>，每次 <code>running</code> 变化都会重跑 —— <b>清掉旧定时器、建新的</b>，而且 <code>poll()</code> 会立刻再发一次请求。<b>依赖数组写错会导致无限循环。</b></p>
+  <p>如果漏了某个依赖，闭包会捕获<b>旧的</b>值（stale closure）。这是 React 最难 debug 的一类问题。</p>
+</div>
+
+<h3><code>useCallback</code> / <code>useMemo</code> 是干什么的</h3>
+
+<div class="filename">src/client/store.js:38（useMemo 的例子）</div>
+<pre><code>const catalog = useMemo(() =&gt; new Map((snap?.mods || []).map((m) =&gt; [m.key, m])), [snap])</code></pre>
+
+<p>建一个 Map 是 O(n)。如果每次渲染都重建，几百个 mod 就是几百次操作 × 每次键盘输入。所以用 <code>useMemo</code> 缓存：<b>只有 <code>snap</code> 变了才重建</b>。</p>
+
+<table>
+  <thead><tr><th>Hook</th><th>作用</th><th>Python 类比</th></tr></thead>
+  <tbody>
+    <tr><td><code>useMemo(fn, deps)</code></td><td>缓存<b>计算结果</b></td><td><code>functools.lru_cache</code>（按 deps 作 key）</td></tr>
+    <tr><td><code>useCallback(fn, deps)</code></td><td>缓存<b>函数本身</b>（避免每次渲染都造新函数）</td><td>没有直接对应</td></tr>
+    <tr><td><code>useRef(init)</code></td><td>存一个"跨渲染保持，但改它不触发重画"的值</td><td>可变的闭包变量</td></tr>
+  </tbody>
+</table>
+
+<div class="tip">
+  <b>为什么 <code>useCallback</code> 在本项目里很重要</b>
+  <p>看 <code>store.js:34</code>：<code>useEffect(() =&gt; { refresh() }, [refresh])</code>。<code>refresh</code> 在依赖数组里！如果 <code>refresh</code> 每次渲染都是新函数，<code>useEffect</code> 每次都重跑，<b>就无限发请求了</b>。</p>
+  <p>所以 <code>refresh</code> 必须用 <code>useCallback(..., [])</code> 包住，保证引用稳定。这两个 Hook 是配套使用的。</p>
+</div>
+
+<h2>整个前端的状态都在一个函数里</h2>
+
+<div class="filename">src/client/store.js:49-116（核心部分）</div>
+<pre><code>  const run = useCallback(
+    async (fn, okMsg) =&gt; {
+      setBusy(true)
+      try {
+        const r = await fn()
+        if (okMsg) say(okMsg)
+        return r
+      } catch (e) {
+        say('✖ ' + e.message)
+        throw e
+      } finally {
+        setBusy(false)
+      }
+    },
+    [say],
+  )
+
+  const actions = {
+    refresh,
+    setOrder: (ids) =&gt; setDraft(ids),
+    activate: (keys, index) =&gt; { ... },
+    deactivate: (keys) =&gt; { ... },
+    move: (key, to) =&gt; { ... },
+    discard: () =&gt; setDraft(null),
+    setOrderFromServer: async () =&gt; { setDraft(null); await refresh() },
+    save: () =&gt; run(async () =&gt; { await api('setActive', { ids: active }); setDraft(null); await refresh() }, t('saved')),
+    sort: () =&gt; run(async () =&gt; { ... }),
+    rescan: () =&gt; run(async () =&gt; { ... }, ...),
+    api: (method, args, okMsg) =&gt; run(() =&gt; api(method, args), okMsg),
+    say,
+  }
+
+  return { snap, error, busy, toast, active, dirty, diag, catalog, actions }</code></pre>
+
+<p><b>整个前端只有这一个"状态中心"。</b>所有组件从 <code>useRimlist()</code> 拿数据、调用 <code>actions</code>。</p>
+
+<div class="note">
+  <b>这个模式叫 "custom hook"</b>
+  <p>把一堆相关的 <code>useState</code> + <code>useEffect</code> + 操作函数打包成一个函数 <code>useRimlist()</code>，返回一个对象。组件里一行 <code>const { snap, actions } = useRimlist()</code> 就拿到全部能力和数据。</p>
+  <p>Python 里最接近的类比：一个带状态的控制器对象。但注意 —— <b>这不是 class</b>，是每次渲染都重新执行的函数。<code>useState</code> 负责"把状态存在 React 那里，跨渲染保留"。</p>
+</div>
+
+<h3><code>run()</code> 这个包装器的价值</h3>
+
+<p>看看它统一处理了什么：</p>
+
+<div class="kv">
+  <div><span class="k"><code>setBusy(true)</code></span><span class="v">所有按钮自动变灰（页面里到处 <code>disabled={busy}</code>）。用户不会重复点击。</span></div>
+  <div><span class="k"><code>try/catch</code></span><span class="v">任何 API 错误都变成一条 toast 提示，<b>界面不会白屏</b>。</span></div>
+  <div><span class="k"><code>finally</code></span><span class="v">成功失败都恢复 <code>busy = false</code>。不会卡在"永远加载中"。</span></div>
+  <div><span class="k"><code>throw e</code></span><span class="v">报完错<b>还往上抛</b>，调用方可以选择额外处理（比如 <code>startGame</code> 里额外 <code>say('❌ ...')</code>）。</span></div>
+</div>
+
+<p>如果没有这个包装，每个按钮都要写一遍 try/catch/setBusy/toast。现在只要 <code>run(async () =&gt; {...})</code>。</p>
+
+<h2>界面的骨架</h2>
+
+<div class="filename">src/client/app.jsx:189-212（顶栏，删减了一些按钮）</div>
+<pre><code>return (
+  &lt;div className={rootCls}&gt;
+    &lt;div className="rl-head"&gt;
+      &lt;div className="rl-brand"&gt;&lt;b&gt;RimList&lt;/b&gt;&lt;span&gt;RimWorld {snap.game?.major || '?'}&lt;/span&gt;&lt;/div&gt;
+      &lt;span className="rl-stat"&gt;&lt;span className={'rl-dot ' + dot} /&gt; &lt;b&gt;{active.length}&lt;/b&gt;/{snap.mods.length}&lt;/span&gt;
+      &lt;span className="rl-stat" title={t('errors') + ' / ' + t('warnings')}&gt;&lt;b&gt;{counts.error}&lt;/b&gt; ✖ &lt;b&gt;{counts.warning}&lt;/b&gt; ▲&lt;/span&gt;
+      &lt;div className="rl-head-spacer" /&gt;
+      &lt;button className="rl-btn rl-btn-lg" onClick={actions.sort} disabled={busy} title={t('sortTitle')}&gt;
+        &lt;span className="rl-btn-ico"&gt;⇅&lt;/span&gt;{t('sort')}
+      &lt;/button&gt;
+      &lt;button className="rl-btn rl-btn-lg" onClick={actions.rescan} disabled={busy}&gt;...&lt;/button&gt;
+      {dirty &amp;&amp; &lt;button className="rl-btn rl-btn-ghost" onClick={actions.discard}&gt;✕&lt;/button&gt;}
+      &lt;button className={'rl-btn rl-btn-primary' + (dirty ? ' rl-pulse' : '')} onClick={actions.save} disabled={busy || !dirty}&gt;
+        {t('save')}
+      &lt;/button&gt;
+    &lt;/div&gt;
+    ...
+  &lt;/div&gt;
+)</code></pre>
+
+<p>注意几个 UI 技巧：</p>
+
+<div class="kv">
+  <div><span class="k"><code>{dirty &amp;&amp; &lt;button&gt;✕&lt;/button&gt;}</code></span><span class="v">只有有改动时才显示"放弃"按钮。<b><code>&amp;&amp;</code> 是 React 里的条件渲染</b>，等价于 <code>if (dirty) ...</code>。</span></div>
+  <div><span class="k"><code>disabled={busy || !dirty}</code></span><span class="v">保存按钮在"正在忙"或"没改动"时禁用。不用写 if-else，直接算。</span></div>
+  <div><span class="k"><code>+ (dirty ? ' rl-pulse' : '')</code></span><span class="v">有未保存改动时加一个脉冲动画的 class，视觉提醒。</span></div>
+  <div><span class="k"><code>className={'rl-btn' + (x ? ' y' : '')}</code></span><span class="v">拼接 class 的惯用法。（有 <code>clsx</code> 这类库可以更干净，但项目没用依赖。）</span></div>
+</div>
+
+<h2>组件间怎么传数据</h2>
+
+<div class="filename">src/client/app.jsx:221-239（App 渲染 InactiveColumn）</div>
+<pre><code>&lt;InactiveColumn
+  mods={snap.mods}
+  activeSet={activeSet}
+  selection={selection}
+  setSelection={setSelection}
+  onActivate={activateKeys}
+  onDeactivate={deactivateKeys}
+  issuesByMod={issuesByMod}
+  major={snap.game?.major}
+  filter={inactiveFilter}
+  setFilter={setInactiveFilter}
+  sourceFilter={sourceFilter}
+  setSourceFilter={setSourceFilter}
+  tagIndex={tagIndex}
+  allTags={inactiveTags}
+  tag={inactiveTag}
+  setTag={setInactiveTag}
+  onSubscribe={handleSubscribe}
+/&gt;</code></pre>
+
+<div class="note">
+  <b>这叫 "prop drilling"，并且这个例子已经暴露了它的缺点</b>
+  <p>App 把一个状态和它的 setter 一路传下去。<b>14 个 props 确实很多</b> —— 这是这个项目里唯一"不够漂亮"的地方。</p>
+  <p>React 生态里有 Context / Redux / Zustand 来处理"深层传递"。这个项目选了最朴素的方式：全部从顶层传。<b>好处是没有额外依赖、数据流向清晰（一看 App 就知道全部状态在哪）。</b></p>
+</div>
+
+<h2>事件处理</h2>
+
+<div class="filename">src/client/columns.jsx:58-70（ModRow 的行点击）</div>
+<pre><code>&lt;div
+  className={'rl-row' + (worst ? ' rl-has-' + worst : '') + (dragProps?.className || '')}
+  aria-selected={selected}
+  data-key={mod.key}
+  onClick={(e) =&gt; {
+    onSelect(mod.key, e)
+    e.currentTarget.closest('.rl-list')?.focus({ preventScroll: true })
+  }}
+  onDoubleClick={() =&gt; onPrimary(mod.key)}
+  title={mod.packageId}
+  {...(dragProps?.handlers || {})}
+  draggable
+&gt;</code></pre>
+
+<div class="kv">
+  <div><span class="k"><code>onClick={(e) =&gt; ...}</code></span><span class="v">传的是<b>函数</b>，不是调用结果。写 <code>onClick={onSelect(key)}</code> 是错的 —— 那会立刻执行。</span></div>
+  <div><span class="k"><code>e</code></span><span class="v">事件对象。这里用它判断 <code>shiftKey</code> / <code>ctrlKey</code>（多选）—— 见下面的 <code>select</code> 函数。</span></div>
+  <div><span class="k"><code>e.currentTarget</code></span><span class="v">事件绑定的那个元素（对比 <code>e.target</code> = 实际点到的元素）。</span></div>
+  <div><span class="k"><code>{...(dragProps?.handlers || {})}</code></span><span class="v"><b>展开 props。</b>把 <code>{ onDragStart, onDragOver, onDrop, ... }</code> 这个对象摊开成多个 JSX 属性。<code>?. || {}</code> 保证没传时不崩。</span></div>
+</div>
+
+<h3>多选：这是前端最有含金量的逻辑</h3>
+
+<div class="filename">src/client/columns.jsx:109-120</div>
+<pre><code>const select = (key, e) =&gt; {
+  if (e.shiftKey &amp;&amp; selection.anchor) {
+    const a = order.indexOf(selection.anchor)
+    const b = order.indexOf(key)
+    const [lo, hi] = a &lt; b ? [a, b] : [b, a]
+    setSelection({ keys: new Set(order.slice(lo, hi + 1)), anchor: selection.anchor, focus: key, side: 'active' })
+  } else if (e.ctrlKey || e.metaKey) {
+    const keys = new Set(selection.side === 'active' ? selection.keys : [])
+    keys.has(key) ? keys.delete(key) : keys.add(key)
+    setSelection({ keys, anchor: key, side: 'active' })
+  } else setSelection({ keys: new Set([key]), anchor: key, side: 'active' })
+}</code></pre>
+
+<table>
+  <thead><tr><th>按键</th><th>行为</th><th>实现</th></tr></thead>
+  <tbody>
+    <tr><td>普通点击</td><td>只选这一个</td><td><code>new Set([key])</code></td></tr>
+    <tr><td><code>Shift</code> + 点击</td><td>从 anchor 到这里的<b>一整段</b></td><td>算 lo/hi 后 <code>slice</code></td></tr>
+    <tr><td><code>Ctrl</code> / <code>Cmd</code></td><td>切换这一个（加/减）</td><td><code>has ? delete : add</code></td></tr>
+  </tbody>
+</table>
+
+<div class="tip">
+  <b>三个细节</b>
+  <ol style="margin-bottom:0">
+    <li><b><code>anchor</code> 和 <code>keys</code> 分开存。</b><code>keys</code> 是选中的集合，<code>anchor</code> 是"从哪开始算 Shift 范围"。没有 anchor 就没法做范围选择。</li>
+    <li><b>用 <code>Set</code> 而不是数组。</b>因为要频繁 <code>has</code> / <code>add</code> / <code>delete</code>，Set 是 O(1)。</li>
+    <li><b><code>metaKey</code> = macOS 的 Cmd。</b>写 <code>e.ctrlKey || e.metaKey</code> 才能跨平台。</li>
+  </ol>
+</div>
+
+<h3>拖拽排序：最难读懂的一段</h3>
+
+<div class="filename">src/client/columns.jsx:135-151</div>
+<pre><code>onDrop: (e) =&gt; {
+  e.preventDefault()
+  const ext = e.dataTransfer.getData('text/rimlist-inactive')
+  const idx = order.indexOf(key) + (drag?.pos === 'after' ? 1 : 0)
+  if (ext) {
+    onDropFromInactive(JSON.parse(ext), idx)
+  } else if (drag?.keys?.length) {
+    const moving = new Set(drag.keys)
+    const rest = order.filter((k) =&gt; !moving.has(k))
+    const anchorIdx = rest.indexOf(key)
+    const insertAt = moving.has(key) ? idx - drag.keys.filter((k) =&gt; order.indexOf(k) &lt; idx).length : anchorIdx + (drag.pos === 'after' ? 1 : 0)
+    const next = [...rest]
+    next.splice(Math.max(0, Math.min(next.length, insertAt)), 0, ...drag.keys.sort((a, b) =&gt; order.indexOf(a) - order.indexOf(b)))
+    onReorder(next)
+  }
+  setDrag(null)
+},</code></pre>
+
+<p>它在处理一个<b>经典难题</b>：多选状态下拖动，插入位置怎么算？</p>
+
+<div class="note">
+  <b>为什么难</b>
+  <p>假设列表是 <code>[A, B, C, D, E]</code>，你选中了 <code>[A, B]</code>，想拖到 D 前面。目标索引是 3。</p>
+  <p>如果直接把 A、B 插到索引 3，结果会是 <code>[C, D, A, B, E]</code> —— <b>错了</b>。因为你把 A、B 从前面抽走之后，后面的元素全都往前挪了 2 位，D 现在在索引 1 而不是 3。</p>
+  <p>所以要修正：<code>idx - (被移走的、且在目标之前的元素个数)</code>。这就是那一行的含义：</p>
+  <pre><code>insertAt = idx - drag.keys.filter((k) =&gt; order.indexOf(k) &lt; idx).length</code></pre>
+  <p>在本例中：<code>3 - 2 = 1</code>。把 <code>[A,B]</code> 插到 <code>[C,D,E]</code> 的索引 1 → <code>[C, A, B, D, E]</code>。正确。</p>
+</div>
+
+<h3>键盘操作：Alt+↑/↓ 移动</h3>
+
+<div class="filename">src/client/columns.jsx:177-196（节选）</div>
+<pre><code>if (e.altKey &amp;&amp; (e.key === 'ArrowUp' || e.key === 'ArrowDown') &amp;&amp; selection.side === 'active' &amp;&amp; selection.keys.size) {
+  e.preventDefault()
+  const sel = selection.keys
+  const next = [...order]
+  const up = e.key === 'ArrowUp'
+  const idxs = next.map((k, i) =&gt; (sel.has(k) ? i : -1)).filter((i) =&gt; i &gt;= 0)
+  if (up ? idxs[0] === 0 : idxs[idxs.length - 1] === next.length - 1) return
+  for (const i of up ? idxs : idxs.reverse()) {
+    const j = up ? i - 1 : i + 1
+    ;[next[i], next[j]] = [next[j], next[i]]
+  }
+  onReorder(next)
+  ...
+}</code></pre>
+
+<div class="kv">
+  <div><span class="k"><code>sel.has(k) ? i : -1</code></span><span class="v">选出所有被选中的下标。不用 <code>filter</code> + <code>indexOf</code>，一次遍历搞定。</span></div>
+  <div><span class="k">边界检查</span><span class="v">已经到顶还要上移？直接 return。（<code>idxs[0] === 0</code> 表示最上面那个也被选中了。）</span></div>
+  <div><span class="k"><b><code>up ? idxs : idxs.reverse()</code></b></span><span class="v">关键！<b>往下移必须从下往上处理</b>，否则会互相踩踏。<br>举例：选中 <code>[1,2]</code> 往下移。正序：先换 1↔2（变成 2 在那个位置），再换 2↔3 —— 乱套了。倒序：先换 2↔3，再换 1↔2。正确。</span></div>
+  <div><span class="k"><code>;[a, b] = [b, a]</code></span><span class="v">交换两个元素。<b>行首那个分号不能省！</b>否则上一行的 <code>const j = ...</code> 会被解析成连续表达式（<code>... i + 1;[...]</code> 是数组字面量）。这是 JS 自动分号插入的坑。</span></div>
+</div>
+
+<h2>数据怎么到前端：就那一个函数</h2>
+
+<div class="filename">src/client/api.js:1-16</div>
+<pre><code>export async function api(method, args = {}) {
+  const res = await fetch('/api/rimlist', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ method, args }),
+  })
+  let body
+  try {
+    body = await res.json()
+  } catch {
+    throw new Error(`rimlist: bad response (${res.status})`)
+  }
+  if (!res.ok || !body.ok) throw new Error(body?.error || `rimlist: HTTP ${res.status}`)
+  return body.result
+}</code></pre>
+
+<p>和 Python 的 <code>requests.post(...).json()</code> 完全一样，只是多了错误处理。注意 <code>if (!res.ok || !body.ok)</code> —— <b>两层都要检查</b>：HTTP 状态码 + 业务层的 <code>ok</code> 标志。</p>
+
+<div class="filename">src/client/entry.jsx:19-51（前端怎么挂进 DSH）</div>
+<pre><code>const plugin = {
+  name: 'dsh-rimlist',
+  inject: ['slots', 'locale'],
+  apply(ctx) {
+    setupLocale(ctx)
+    injectStyles()
+    const slots = ctx.get('slots')
+    <span class="c">// Single entry point: a tab in the right sidebar (requires sidebarRightTabs from the harness).</span>
+    if (typeof ctx.inject === 'function') {
+      ctx.inject(['sidebarRightTabs'], (owner) =&gt; {
+        const tabs = owner.get('sidebarRightTabs')
+        owner.effect(
+          () =&gt;
+            tabs.register({
+              id: SIDEBAR_TAB_ID,
+              kind: SIDEBAR_TAB_KIND,
+              priority: 'extension',
+              title: () =&gt; t('sidebarTitle'),
+              guide: [{ order: 90, title: () =&gt; t('sidebarTitle') }],
+            }),
+          'dsh-rimlist: sidebar tab type',
+        )
+        const ownerSlots = owner.slots || slots
+        ownerSlots.inject('sidebar.right.pane.tab', () =&gt;
+          ownerSlots.register(
+            { name: 'sidebar.right.pane.tab', key: SIDEBAR_TAB_ID, inject: () =&gt; ({ inSidebar: true }) },
+            (props) =&gt; createElement(RimlistApp, { ...props, inSidebar: true }),
+          ),
+        )
+      })
+    }
+  },
+}
+export default plugin</code></pre>
+
+<p>这是"插件挂到宿主界面"的样板。三个概念：</p>
+
+<div class="kv">
+  <div><span class="k"><code>ctx.inject(['服务名'], cb)</code></span><span class="v">等宿主提供了这个服务再执行回调。因为插件的加载顺序不保证（和 <code>index.js</code> 里重试注册路由是一个问题）。</span></div>
+  <div><span class="k"><code>tabs.register({...})</code></span><span class="v">声明"我要加一个标签页"，给 id、类型、标题。<code>title: () =&gt; t('sidebarTitle')</code> —— <b>传函数而不是字符串</b>，这样语言切换后标题会跟着变。</span></div>
+  <div><span class="k"><code>ownerSlots.register({name, key}, Component)</code></span><span class="v">注册<b>渲染什么</b>。第二个参数是函数：<code>(props) =&gt; createElement(RimlistApp, {...props, inSidebar: true})</code>。<b><code>createElement(RimlistApp, props)</code> 就是 <code>&lt;RimlistApp {...props} /&gt;</code> 的手写版。</b></span></div>
+</div>
+
+<div class="tip">
+  <b><code>owner.effect(fn, label)</code></b>
+  <p>这是 DSH 的生命周期管理。<code>fn</code> 里注册的东西会在插件卸载时自动清理。<b>你不用手动反注册</b> —— 这和 <code>useEffect</code> 返回清理函数是一个思路。</p>
+</div>
+
+<h2>国际化：一个朴素但够用的方案</h2>
+
+<div class="filename">src/client/i18n.js:1-8（中文文案表）</div>
+<pre><code>export const NS = 'dsh-rimlist'
+
+export const zh = {
+  tab: 'Mods',
+  loading: '正在扫描 RimWorld…',
+  noGame: '没有找到 RimWorld 安装。请在设置里填写游戏目录与配置目录。',
+  inactive: '未启用',
+  active: '已启用',
+  ...
+}</code></pre>
+
+<div class="filename">src/client/i18n.js:622-638</div>
+<pre><code>let service = null
+let bound = null
+export function setupLocale(ctx) {
+  const l = ctx.get('locale')
+  if (!l) return
+  service = l
+  try {
+    l.register(NS, 'zh', zh)
+    l.register(NS, 'en', en)
+  } catch {}
+  bound = l.bind(NS)
+}
+export function t(key) {
+  return bound ? bound(key) : zh[key] ?? key
+}</code></pre>
+
+<p>两个设计点：</p>
+
+<div class="kv">
+  <div><span class="k">降级到中文</span><span class="v"><code>bound ? bound(key) : zh[key] ?? key</code> —— 如果 DSH 没提供 locale 服务（比如独立运行时），直接用 <code>zh</code> 表。再找不到就返回 key 本身。 <b>永远不会显示 undefined。</b></span></div>
+  <div><span class="k">用模块级变量</span><span class="v"><code>let service</code> 和 <code>let bound</code> 是全模块共享的单例。这是 React 里少见的"在组件外存状态"，但对"语言"这种全局设置是合理的。</span></div>
+</div>
+
+<div class="filename">src/client/app.jsx:22（语言变了怎么重画）</div>
+<pre><code>useSyncExternalStore(subscribe, snapshot, snapshot) <span class="c">// re-render on locale change</span></code></pre>
+
+<p>这一行没有任何赋值 —— 它的唯一作用是"订阅一个外部数据源，变了就重画"。<code>subscribe</code> / <code>snapshot</code> 来自 i18n.js。这是 React 18 提供的官方途径，用来把"React 之外的状态"接进来。</p>
+
+<h2>CSS 怎么加载的</h2>
+
+<div class="filename">src/client/entry.jsx:1-14</div>
+<pre><code>import { createElement } from 'react'
+import css from './styles.css'
+...
+let styleInjected = false
+function injectStyles() {
+  if (styleInjected || typeof document === 'undefined') return
+  styleInjected = true
+  const el = document.createElement('style')
+  el.setAttribute('data-dsh-rimlist', '')
+  el.textContent = css
+  document.head.appendChild(el)
+}</code></pre>
+
+<div class="note">
+  <b>为什么是 <code>import css from './styles.css'</code></b>
+  <p>正常 JS 不能 import CSS。但 <code>build.mjs</code> 里有个插件（第 2 页看过），把 CSS 文件当<b>纯文本</b>读进来，所以 <code>css</code> 变量就是一个字符串。</p>
+  <p>然后 create 一个 <code>&lt;style&gt;</code> 标签塞进 <code>&lt;head&gt;</code>。<code>styleInjected</code> 保证只做一次（重复插入会导致样式重复，虽然无害但浪费）。</p>
+  <p><code>data-dsh-rimlist</code> 属性是为了方便调试时在 DevTools 里找到这个 style 标签。</p>
+</div>
+
+<h2>前端文件各自负责什么</h2>
+
+<table>
+  <thead><tr><th>文件</th><th>行数</th><th>职责</th><th>读它值得吗</th></tr></thead>
+  <tbody>
+    <tr><td><code>entry.jsx</code></td><td>49</td><td>挂载到 DSH 侧栏 + 注入样式</td><td>⭐⭐⭐ 想知道插件怎么接入就必读</td></tr>
+    <tr><td><code>store.js</code></td><td>108</td><td>全部状态和操作</td><td>⭐⭐⭐ <b>前端最重要的文件</b></td></tr>
+    <tr><td><code>api.js</code></td><td>50</td><td>那一个 fetch + 几个 URL 工具</td><td>⭐⭐ 五分钟看完</td></tr>
+    <tr><td><code>app.jsx</code></td><td>302</td><td>界面骨架、顶栏、键盘快捷键</td><td>⭐⭐⭐ 主流程在这</td></tr>
+    <tr><td><code>columns.jsx</code></td><td>325</td><td>两栏列表、拖拽、多选</td><td>⭐⭐ 挑拖拽那段看就好</td></tr>
+    <tr><td><code>panels.jsx</code></td><td>998</td><td>详情/诊断/列表/规则/设置五个面板</td><td>⭐ 按需查，别通读</td></tr>
+    <tr><td><code>versions.jsx</code></td><td>323</td><td>更新日志、备份、git</td><td>⭐ 按需</td></tr>
+    <tr><td><code>logpanel.jsx</code></td><td>134</td><td>Player.log 查看器</td><td>⭐ 按需</td></tr>
+    <tr><td><code>i18n.js</code></td><td>635</td><td>中英文案表（600 行都是文案）</td><td>⭐ 只在加新文案时查</td></tr>
+    <tr><td><code>chat.js</code></td><td>38</td><td>把日志摘要塞进 DSH 对话框</td><td>⭐ 有趣的 hack</td></tr>
+  </tbody>
+</table>
+
+<h3>chat.js：一个有意思的 hack</h3>
+
+<div class="filename">src/client/chat.js:8-34</div>
+<pre><code>export async function sendToChat(text) {
+  const editor = findComposer()
+  if (editor) {
+    try {
+      editor.focus()
+      const sel = window.getSelection()
+      if (sel) {
+        const range = document.createRange()
+        range.selectNodeContents(editor)
+        range.collapse(false)
+        sel.removeAllRanges()
+        sel.addRange(range)
+      }
+      const dt = new DataTransfer()
+      dt.setData('text/plain', text)
+      const ev = new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })
+      editor.dispatchEvent(ev)
+      if (editor.textContent &amp;&amp; editor.textContent.includes(text.slice(0, 40))) return 'inserted'
+      <span class="c">// some editors ignore synthetic paste: try insertText</span>
+      if (document.execCommand &amp;&amp; document.execCommand('insertText', false, text)) return 'inserted'
+    } catch {}
+  }
+  try {
+    await navigator.clipboard.writeText(text)
+  } catch {}
+  return 'copied'
+}</code></pre>
+
+<p>目标：把"游戏日志摘要"直接填进对话输入框，让用户不用手动复制粘贴。</p>
+
+<div class="note">
+  <b>做法：伪造一个"粘贴"事件</b>
+  <p>DSH 的输入框是个富文本编辑器（Lexical），直接改 <code>innerHTML</code> 会让它的内部状态错乱。所以：</p>
+  <ol>
+    <li>找输入框</li>
+    <li>把光标移到末尾</li>
+    <li>造一个假的 <code>paste</code> 事件，里面装着要插入的文本</li>
+    <li>派发它 —— 编辑器以为是用户粘贴的，走正常流程</li>
+    <li>验证：检查 <code>textContent</code> 里有没有那段文字（确认真的插进去了）</li>
+    <li>备选方案：<code>execCommand('insertText')</code></li>
+    <li>最后的备选：<b>复制到剪贴板</b>，然后告诉用户"你自己粘贴一下"</li>
+  </ol>
+  <p><b>三层降级</b>，每层失败都往下一层。这是对付"别人的界面不可控"的经典策略。</p>
+</div>
+
+<h2>调试前端</h2>
+
+<div class="grid2">
+  <div class="card">
+    <h4>看请求</h4>
+    <p>F12 → Network → 过滤 <code>rimlist</code>。每次点按钮都能看到 POST 和返回的 JSON。<b>这是查"为什么界面没变"最快的办法</b> —— 先看请求发没发、结果对不对。</p>
+  </div>
+  <div class="card">
+    <h4>看 React 状态</h4>
+    <p>装 React DevTools 扩展，能看到组件树和每个组件的 state。<code>snap</code> / <code>draft</code> / <code>diag</code> 都在 <code>RimlistApp</code> 那个组件上。</p>
+  </div>
+  <div class="card">
+    <h4>看报错</h4>
+    <p>Console 里的红字。<b>项目里还留了不少 <code>console.log('[RimList] ...')</code></b>，比如 <code>app.jsx:92</code> 的 <code>startGame</code>，搜 <code>[RimList]</code> 能找到全部。</p>
+  </div>
+  <div class="card">
+    <h4>改完要重新构建</h4>
+    <p><code>node build.mjs</code> 然后刷新页面。<code>lib/client.js</code> 是生成物，浏览器加载的是它，不是 <code>src/</code>。</p>
+  </div>
+</div>
+
+<h2>修改界面时的检查清单</h2>
+
+<ol class="steps">
+  <li>
+    <b>需要新数据吗？</b><br>
+    如果要后端还不提供的数据，先加 service 方法（第 6 页），再在 <code>store.js</code> 的 <code>actions</code> 里加一个调用。
+  </li>
+  <li>
+    <b>改的是"服务器状态"还是"本地草稿"？</b><br>
+    排序、拖拽这类<b>应该只在草稿里改</b>，等用户点保存才写盘。直接调 <code>setActive</code> 会让每次拖动都写一次 <code>ModsConfig.xml</code>。
+  </li>
+  <li>
+    <b>用 <code>actions</code> 还是直接 <code>api()</code>？</b><br>
+    用 <code>actions.something()</code>（走 <code>run</code> 包装，有 busy 和错误提示）优先。只有非常特殊的场景才直接 <code>api()</code>。
+  </li>
+  <li>
+    <b>新文案加进 i18n 了吗？</b><br>
+    不要在 JSX 里写死中文。加 <code>zh.xxx</code> 和 <code>en.xxx</code>，然后 <code>t('xxx')</code>。
+  </li>
+  <li>
+    <b>重新 build + 刷新了吗？</b><br>
+    <code>node build.mjs</code>，然后浏览器硬刷新（Ctrl+Shift+R）。
+  </li>
+</ol>
+
+<div class="note">
+  <b>这一页的收获</b>
+  <p>React 的核心就三样：<b>组件（函数返回 JSX）、状态（useState + 不可变更新）、副作用（useEffect + 清理）</b>。剩下的都是这三样的组合。</p>
+  <p>这个项目的前端可能不够"现代"（没有 Context、没有状态库、prop 传得有点多），但<b>它的数据流极其清晰</b>：所有状态在 <code>useRimlist()</code>，所有后端调用在 <code>api()</code>，所有界面在几个 <code>.jsx</code> 里。这种"无聊但清晰"的写法，长期维护起来反而舒服。</p>
+</div>
+
+<div class="pager">
+  <a href="06-service.html"><span>上一页</span>← 6 · service.js</a>
+  <a href="08-hands-on.html" class="nx"><span>下一页</span>8 · 动手改与测试 →</a>
+</div>
+
+</main>
+</body>
+</html>

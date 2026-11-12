@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>5 · 规则库与列表 · RimList 代码导读</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="side">
+  <div class="brand">
+    <b>RimList 代码导读</b>
+    <span>写给会一点 Python 的人</span>
+  </div>
+  <a href="index.html">0 · 先看这里</a>
+  <a href="01-js.html">1 · JS 速通</a>
+  <a href="02-entry.html">2 · 入口 index.js</a>
+  <a href="03-scan.html">3 · 扫描 mod</a>
+  <a href="04-sort.html">4 · 排序与诊断</a>
+  <a href="05-rules.html" class="on">5 · 规则库与列表</a>
+  <a href="06-service.html">6 · service.js</a>
+  <a href="07-client.html">7 · 前端 React</a>
+  <a href="08-hands-on.html">8 · 动手改与测试</a>
+  <div class="side-foot">
+    文件：<code>src/host/rules.js</code>（467 行）<br>
+    <code>src/host/lists.js</code>（252 行）<br>
+    <code>src/host/archive.js</code>（55 行）
+  </div>
+</nav>
+
+<main>
+
+<div class="kicker">第 5 页 · 数据供给</div>
+
+<h1>
+  规则库与分享列表
+  <span class="sub">上一页的排序算法吃两类输入：<b>规则</b>（谁该在谁前面）和 <b>列表</b>（启用哪些 mod）。这一页看这两样东西是怎么维护的。</span>
+</h1>
+
+<h2>五个规则库</h2>
+
+<p>RimWorld 社区维护了几套公开数据库，RimSort 也在用。这个项目全接上了。</p>
+
+<div class="filename">src/host/rules.js:26-72（节选 community 和 steam 两项）</div>
+<pre><code>export const DB_DEFS = {
+  community: {
+    label: 'Community Rules',
+    repo: 'https://github.com/RimSort/Community-Rules-Database',
+    raw: () =&gt; 'https://raw.githubusercontent.com/RimSort/Community-Rules-Database/main/communityRules.json',
+    zip: 'https://github.com/RimSort/Community-Rules-Database/archive/refs/heads/main.zip',
+    inZip: 'communityRules.json',
+    cache: () =&gt; 'communityRules.json',
+    rimsortLocal: 'dbs/Community-Rules-Database/communityRules.json',
+  },
+  steam: {
+    label: 'Steam Workshop',
+    repo: 'https://github.com/RimSort/Steam-Workshop-Database',
+    raw: () =&gt; '.../steamDB.json',
+    zip: '.../main.zip',
+    inZip: 'steamDB.json',
+    cache: () =&gt; 'steamDB.slim.json',
+    rimsortLocal: 'dbs/Steam-Workshop-Database/steamDB.json',
+  },
+  noVersionWarning: { ... },
+  useThisInstead: { ... },
+  versions: { ... },
+}
+export const DB_KEYS = Object.keys(DB_DEFS)
+export const DEFAULT_DB_CONFIG = Object.fromEntries(DB_KEYS.map((k) =&gt; [k, { mode: 'github', url: '', path: '' }]))</code></pre>
+
+<table>
+  <thead><tr><th>库</th><th>提供什么</th><th>用在哪</th></tr></thead>
+  <tbody>
+    <tr><td><code>community</code></td><td>loadAfter / loadBefore / loadTop / loadBottom / incompatibleWith</td><td><b>排序和诊断的主力</b></td></tr>
+    <tr><td><code>steam</code></td><td>工坊 mod 的 packageId、名字、<b>页面上声明的依赖</b></td><td>补 About.xml 里漏写的依赖</td></tr>
+    <tr><td><code>noVersionWarning</code></td><td>"没标注 1.6 但确实能用"的 mod id 清单</td><td>把版本警告降级成提示</td></tr>
+    <tr><td><code>useThisInstead</code></td><td>停更 mod → 接替版本</td><td>诊断里建议换新</td></tr>
+    <tr><td><code>versions</code></td><td>RimWorld 版本历史</td><td>版本选择界面</td></tr>
+    <tr><td><code>user</code>（本地）</td><td>你自己加的规则</td><td>优先级高于 community</td></tr>
+  </tbody>
+</table>
+
+<div class="note">
+  <b>每个库的配置对象长得一样，这是个刻意的设计</b>
+  <p>都有 <code>raw</code>（直链）、<code>zip</code>（仓库打包）、<code>inZip</code>（压缩包里要的文件名）、<code>cache</code>（本地缓存文件名）、<code>rimsortLocal</code>（RimSort 安装目录下的相对路径）。</p>
+  <p>因为形状统一，后面<b>一套代码处理五个库</b>，不用写五遍。<code>DB_KEYS = Object.keys(DB_DEFS)</code> 就是从定义里自动推出所有键，加新库不用改别处。</p>
+</div>
+
+<h3>四种来源模式</h3>
+
+<div class="filename">src/host/rules.js:1-20（文件头注释）+ 127-140（obtain 函数）</div>
+<pre><code>const obtain = async (key, major) =&gt; {
+  const def = DB_DEFS[key]
+  const c = cfg(key)
+  const inZip = typeof def.inZip === 'function' ? def.inZip(major) : def.inZip
+  if (c.mode === 'local') {
+    if (!c.path) throw new Error(def.label + ': local file path not set')
+    return unwrap(await readFile(c.path), inZip, c.path)
+  }
+  if (c.mode === 'url') {
+    if (!c.url) throw new Error(def.label + ': URL not set')
+    return fetchText(c.url, inZip)
+  }
+  return fetchText(def.raw(major), inZip)
+}</code></pre>
+
+<table>
+  <thead><tr><th>mode</th><th>行为</th><th>什么场景</th></tr></thead>
+  <tbody>
+    <tr><td><code>'github'</code>（默认）</td><td>从官方 GitHub 拉 raw 文件</td><td>绝大多数人</td></tr>
+    <tr><td><code>'url'</code></td><td>任意 URL，支持 raw / .gz / 仓库 .zip</td><td>用镜像或自己的 fork</td></tr>
+    <tr><td><code>'local'</code></td><td>直接读磁盘文件</td><td><b>已经有 RimSort 的人</b>—— 复用它的 <code>dbs/</code> 目录，不重复下载</td></tr>
+    <tr><td><code>'none'</code></td><td>不使用</td><td>想要纯粹只看 About.xml 的排序</td></tr>
+  </tbody>
+</table>
+
+<div class="tip">
+  <b>注意 <code>inZip</code> 可能是函数</b>
+  <p><code>typeof def.inZip === 'function' ? def.inZip(major) : def.inZip</code> —— 大多数库的压缩包内路径是固定的字符串，但 NoVersionWarning 的路径依赖游戏版本（<code>1.6/ModIdsToFix.xml</code>）。所以定义里写成函数，用时统一判断。</p>
+  <p>"值可以是值也可以是函数"这个模式在 JS 里很常见（React 的 <code>setState</code> 也是这样），因为区分起来只要一个 <code>typeof</code>。</p>
+</div>
+
+<h3>三层的"取值 → 解压 → 缓存"管道</h3>
+
+<div class="filename">src/host/rules.js:110-125</div>
+<pre><code>const fetchText = async (url, inZip) =&gt; {
+  const res = await fetchImpl(url, { headers: { 'user-agent': 'dsh-rimlist' } })
+  if (!res.ok) throw new Error('HTTP ' + res.status + ' for ' + url)
+  const buf = Buffer.from(await res.arrayBuffer())
+  return unwrap(buf, inZip, url)
+}
+const stripBom = (text) =&gt; (text.charCodeAt(0) === 0xfeff ? text.slice(1) : text)
+const unwrap = (buf, inZip, label) =&gt; {
+  if (isZip(buf)) {
+    const inner = zipFind(buf, inZip)
+    if (!inner) throw new Error(`${inZip} not found inside ${label}`)
+    return stripBom(isGzip(inner) ? gunzipText(inner) : inner.toString('utf8'))
+  }
+  if (isGzip(buf)) return stripBom(gunzipText(buf))
+  return stripBom(buf.toString('utf8'))
+}</code></pre>
+
+<p>不管来源是什么（网络 / 本地、zip / gz / 明文），最后都归到<b>一个字符串</b>。这叫"管道末尾统一"：</p>
+
+<div class="flow">GitHub raw  ─┐
+.zip 压缩包 ─┼→ unwrap() → 纯文本字符串 → JSON.parse() 或正则解析
+.gz 压缩    ─┤
+本地文件    ─┘
+
+stripBom() 处理一个 Windows 特有坑：
+UTF-8 BOM（文件开头三个隐形字节 EF BB BF）会让 JSON.parse() 直接崩。</div>
+
+<div class="note">
+  <b>为什么公司内部代码常在这里出 bug</b>
+  <p>因为 Windows 记事本保存 UTF-8 时会加 BOM。这个 3 行的小函数救了无数人。看到 <code>0xfeff</code> 这个魔数，就是在检查 BOM。</p>
+</div>
+
+<h3>缓存策略：先读旧的，后台更新</h3>
+
+<div class="filename">src/host/rules.js:302-316</div>
+<pre><code>const ensure = async ({ major, maxAgeHours = 24 * 7, force = false } = {}) =&gt; {
+  await mkdir(dbDir, { recursive: true })
+  await Promise.all([...DB_KEYS.map((k) =&gt; loadCached(k, major)), loadUser()])
+  const jobs = []
+  for (const key of DB_KEYS) {
+    if (cfg(key).mode === 'none') continue
+    if (key === 'noVersionWarning' &amp;&amp; !major) continue
+    <span class="c">// Local files are always re-read (cheap) so edits show up; remote by age.</span>
+    const need = cfg(key).mode === 'local' || force || (await ageHours(cachePath(key, major))) &gt; maxAgeHours
+    if (need) jobs.push(refresh(key, major).catch((e) =&gt; (state[key].error = String(e.message || e))))
+  }
+  await Promise.all(jobs)
+  return status()
+}</code></pre>
+
+<p>这个函数只用了 15 行，但把"离线优先"这件事做对了：</p>
+
+<ol class="steps">
+  <li>
+    <b>先全部读本地缓存</b><br>
+    不管新旧，先加载。这意味着<b>断网也能用</b> —— 有缓存就行。
+  </li>
+  <li>
+    <b>再判断哪些需要更新</b><br>
+    本地文件永远重读（反正是读磁盘，很快，而且用户可能刚改过）。网络文件看年龄，超过 <code>maxAgeHours</code>（默认 7 天 = <code>24*7</code>）才更新。
+  </li>
+  <li>
+    <b>并发更新，失败不影响整体</b><br>
+    <code>.catch((e) =&gt; (state[key].error = ...))</code> —— 某个库下载失败，只记在它的 <code>error</code> 字段里，其他库照常。界面会在设置里显示"这个库有错误"，但功能继续可用。
+  </li>
+</ol>
+
+<div class="tip">
+  <b><code>.catch()</code> 返回的是赋值表达式的值</b>
+  <p><code>.catch((e) =&gt; (state[key].error = String(...)))</code> 里箭头函数直接返回赋值结果。虽然这里不在乎返回值，但<b>这保证了 <code>Promise.all</code> 不会因为一个失败就整体 reject</b>。这是"并发 + 容错"的标准写法。</p>
+  <p>Python 里你会需要 <code>asyncio.gather(..., return_exceptions=True)</code> 或者给每个任务包 try。JS 这里更简洁。</p>
+</div>
+
+<h2>规则的数据形状</h2>
+
+<p>规则库的原始 JSON 格式五花八门（数组 / 对象 / 布尔 / 带 value 的对象），所以有一个规范化函数把它们统一：</p>
+
+<div class="filename">src/host/rules.js:143-160</div>
+<pre><code>const normalizeRules = (raw) =&gt; {
+  const out = {}
+  if (!raw || typeof raw !== 'object') return out
+  for (const [k, v] of Object.entries(raw)) {
+    if (!v || typeof v !== 'object') continue
+    const r = { ...EMPTY_RULES, loadAfter: {}, loadBefore: {}, incompatibleWith: {}, ignoreIncompatible: {} }
+    for (const field of ['loadAfter', 'loadBefore', 'incompatibleWith', 'ignoreIncompatible']) {
+      const src = v[field]
+      if (!src) continue
+      if (Array.isArray(src)) for (const t of src) r[field][pid(t)] = { name: [] }
+      else if (typeof src === 'object') for (const [t, info] of Object.entries(src)) r[field][pid(t)] = { name: Array.isArray(info?.name) ? info.name : info?.name ? [String(info.name)] : [], comment: info?.comment || undefined }
+    }
+    if (v.loadTop &amp;&amp; (v.loadTop === true || v.loadTop.value)) r.loadTop = { comment: v.loadTop.comment || '' }
+    if (v.loadBottom &amp;&amp; (v.loadBottom === true || v.loadBottom.value)) r.loadBottom = { comment: v.loadBottom.comment || '' }
+    out[pid(k)] = r
+  }
+  return out
+}</code></pre>
+
+<p>输出的形状永远是：</p>
+
+<pre><code>{
+  'some.mod': {
+    loadAfter:        { 'other.mod': { name: ['Other Mod'], comment: undefined } },
+    loadBefore:       {},
+    incompatibleWith: {},
+    ignoreIncompatible: {},
+    loadTop:    null,                      <span class="c">// 或 { comment: '' }</span>
+    loadBottom: { comment: '' },
+  },
+}</code></pre>
+
+<p><b>为什么统一成这个形状</b>：因为排序算法（第 4 页）读规则时只需要 <code>Object.entries(rules.loadAfter)</code>，不在乎它原来是什么格式。<b>所有格式差异都被隔离在这个函数里了。</b></p>
+
+<div class="warn">
+  <b>注意 <code>pid(t)</code> 在这里的角色</b>
+  <p>规则库里的 packageId 大小写可能和你的 About.xml 不一样。这里统一转小写后当 key，<b>和 catalog 的 key 命名一致</b>，才能对上。如果哪一步漏了 <code>pid()</code>，规则就会静默失效 —— 排序看起来"没问题"，但规则没生效。这类 bug 最难查。</p>
+</div>
+
+<h3>合并多个来源：<code>rulesFor</code></h3>
+
+<div class="filename">src/host/rules.js:424-436</div>
+<pre><code>const rulesFor = (packageId) =&gt; {
+  const k = pid(packageId)
+  const merged = { loadAfter: {}, loadBefore: {}, incompatibleWith: {}, ignoreIncompatible: {}, loadTop: null, loadBottom: null }
+  const apply = (r, source) =&gt; {
+    if (!r) return
+    for (const f of ['loadAfter', 'loadBefore', 'incompatibleWith', 'ignoreIncompatible']) for (const [t, info] of Object.entries(r[f] || {})) merged[f][t] = { ...info, source }
+    if (r.loadTop) merged.loadTop = { ...r.loadTop, source }
+    if (r.loadBottom) merged.loadBottom = { ...r.loadBottom, source }
+  }
+  if (cfg('community').mode !== 'none') apply(state.community.rules[k], 'community')
+  if (state.userEnabled) apply(state.user.rules[k], 'user')
+  return merged
+}</code></pre>
+
+<div class="note">
+  <b>顺序就是优先级 —— 这里只有两行，但很关键</b>
+  <p>先 <code>apply</code> community，后 <code>apply</code> user。同一个目标 mod，后写的覆盖前面的，所以<b>用户规则永远赢</b>。</p>
+  <p>同时每条规则被贴上 <code>source</code> 标签（<code>'community'</code> 或 <code>'user'</code>），后面排序时用它查优先级表 <code>PRIORITY</code>，界面也用它显示"这条规则来自哪"。</p>
+</div>
+
+<h2>自定义规则：增删改</h2>
+
+<p>这是"社区库错了怎么办"的答案。看添加规则的核心逻辑，它有几处小巧思：</p>
+
+<div class="filename">src/host/rules.js:363-382</div>
+<pre><code>const addUserRule = async ({ packageId, kind, target, comment, name }) =&gt; {
+  const k = pid(packageId)
+  if (!k) throw new Error('packageId required')
+  const r = state.user.rules[k] || (state.user.rules[k] = { loadAfter: {}, loadBefore: {}, incompatibleWith: {}, ignoreIncompatible: {}, loadTop: null, loadBottom: null })
+  if (!r.ignoreIncompatible) r.ignoreIncompatible = {}
+  if (kind === 'loadTop' || kind === 'loadBottom') {
+    r[kind] = { comment: comment || '' }
+    if (kind === 'loadTop') r.loadBottom = null
+    else r.loadTop = null
+  } else if (kind === 'loadAfter' || kind === 'loadBefore' || kind === 'incompatibleWith' || kind === 'ignoreIncompatible') {
+    const t = pid(target)
+    if (!t) throw new Error('target packageId required')
+    if (t === k) throw new Error('a mod cannot reference itself')
+    r[kind][t] = { name: name ? [name] : [], comment: comment || undefined }
+    const opposite = kind === 'loadAfter' ? 'loadBefore' : kind === 'loadBefore' ? 'loadAfter' : kind === 'incompatibleWith' ? 'ignoreIncompatible' : kind === 'ignoreIncompatible' ? 'incompatibleWith' : null
+    if (opposite) delete r[opposite][t]
+  } else throw new Error('unknown rule kind: ' + kind)
+  await saveUser()
+  return r
+}</code></pre>
+
+<div class="kv">
+  <div>
+    <span class="k">互斥自动清理</span>
+    <span class="v">加 <code>loadAfter: X</code> 就自动删掉 <code>loadBefore: X</code>。加 <code>incompatibleWith</code> 就删 <code>ignoreIncompatible</code>。<br><b>不用让用户自己先删旧的</b> —— 否则很容易出现"我加了规则但没生效"的困惑。</span>
+  </div>
+  <div>
+    <span class="k">loadTop / loadBottom 互斥</span>
+    <span class="v"><code>if (kind === 'loadTop') r.loadBottom = null</code> —— 一个 mod 不可能既置顶又置底。</span>
+  </div>
+  <div>
+    <span class="k"><code>t === k</code> 检查</span>
+    <span class="v">禁止自引用。第 4 页 <code>addEdge</code> 里也有同样的检查，两处都防 —— 因为这里的数据可能被手工改 JSON 塞进来。</span>
+  </div>
+  <div>
+    <span class="k">每次改都 <code>saveUser()</code></span>
+    <span class="v">立刻写盘。规则是用户手工配置的，丢了很气人。宁可多写几次磁盘。</span>
+  </div>
+</div>
+
+<h3>写盘为什么要"先写 .tmp 再 rename"</h3>
+
+<div class="filename">src/host/rules.js:93-98</div>
+<pre><code>const writeJsonAtomic = async (file, value) =&gt; {
+  await mkdir(path.dirname(file), { recursive: true })
+  const tmp = file + '.tmp'
+  await writeFile(tmp, JSON.stringify(value), 'utf8')
+  await rename(tmp, file)
+}</code></pre>
+
+<div class="tip">
+  <b>这个模式叫 <b>原子写入</b>，全项目都在用</b>
+  <p>如果直接 <code>writeFile(目标文件)</code>，写到一半程序被杀掉，文件就坏了（只有半个 JSON）。</p>
+  <p>先写临时文件，写完再 <code>rename</code>。而 <code>rename</code> 在<b>同一个磁盘分区内是原子操作</b> —— 要么成功（新文件完整生效），要么失败（旧文件完好）。<b>永远不会出现半截文件。</b></p>
+  <p>Python 里你会用 <code>os.replace()</code>，道理一样。这是配置类文件必须遵守的规矩。</p>
+</div>
+
+<h2>分享 mod 列表</h2>
+
+<p>玩 RimWorld 的人经常发"我的 mod 列表"给别人。<code>lists.js</code> 就干这个。</p>
+
+<div class="filename">src/host/lists.js:1-15（文件头注释）</div>
+<pre><code>/**
+ * Named mod lists: save / load / import / export / diff.
+ *
+ * Storage: &lt;dataDir&gt;/lists/&lt;id&gt;.json
+ *   { id, name, description, author, createdAt, updatedAt, gameVersion,
+ *     mods: [{ packageId, name, publishedFileId?, version? }], source?: { kind, url } }
+ *
+ * Export formats:
+ *   rimlist  — the JSON above (self-describing, best for sharing between players)
+ *   rimsort  — RimSort-style ModsConfig.xml with an extra &lt;rimlist&gt; comment block? No: RimSort
+ *              reads/writes ModsConfig.xml directly, so "rimsort" == modsconfig
+ *   modsconfig — RimWorld ModsConfig.xml
+ *   ids      — plain text packageIds, one per line
+ *   markdown — table with names + workshop links (for forum / Discord posts)
+ */</code></pre>
+
+<p>注释里那句 "No:" 很有意思 —— 作者先想到一个方案，写到一半发现不对，就地改口了。<b>这种注释比干净漂亮的注释更有信息量</b>，因为它记录了取舍过程。</p>
+
+<h3>四种导出格式</h3>
+
+<table>
+  <thead><tr><th>格式</th><th>长什么样</th><th>用在哪</th></tr></thead>
+  <tbody>
+    <tr><td><code>rimlist</code></td><td>自己的 JSON，带名字、作者、工坊 ID</td><td>玩家之间分享（信息最全）</td></tr>
+    <tr><td><code>modsconfig</code></td><td>标准 <code>ModsConfig.xml</code></td><td>直接扔进游戏目录，或给 RimSort</td></tr>
+    <tr><td><code>ids</code></td><td>纯文本，一行一个 packageId</td><td>Gist、issue 里贴</td></tr>
+    <tr><td><code>markdown</code></td><td>表格 + 工坊链接</td><td>论坛、Discord</td></tr>
+  </tbody>
+</table>
+
+<h3>导入：一个函数吃掉所有格式</h3>
+
+<p>这是这个文件里最有意思的部分 —— <code>parseText</code> 要能识别玩家随手粘贴的任何东西。</p>
+
+<div class="filename">test/stores.test.js:32-37（测试揭示了支持哪些格式）</div>
+<pre><code>// workshop urls → steam: placeholders
+const ws = s.parseText('https://steamcommunity.com/sharedfiles/filedetails/?id=2009463077\nsome.mod')
+assert.deepEqual(ws.mods.map((m) =&gt; m.packageId).sort(), ['some.mod', 'steam:2009463077'])
+// RimPy-style keyed JSON
+assert.equal(s.parseText('{"a.b":{"name":"AB","publishedfileid":"7"}}').mods[0].publishedFileId, '7')
+assert.throws(() =&gt; s.parseText('   '), /empty/)</code></pre>
+
+<p>从测试能看出它支持的输入：</p>
+
+<ul>
+  <li>工坊链接（<code>...filedetails/?id=2009463077</code>）→ 转成占位 packageId <code>'steam:2009463077'</code></li>
+  <li>纯 packageId 列表（<code>some.mod</code>）</li>
+  <li>RimPy 风格的 JSON（<code>{"a.b": {...}}</code>）</li>
+  <li>自己的 <code>rimlist</code> JSON</li>
+  <li><code>ModsConfig.xml</code> 原文</li>
+  <li>Markdown 表格</li>
+</ul>
+
+<div class="note">
+  <b><code>'steam:2009463077'</code> 这个占位符很聪明</b>
+  <p>玩家粘了工坊链接，但链接里只有数字 ID，没有 packageId（那个得去 mod 里读）。所以先记成 <code>'steam:&lt;数字&gt;'</code>，等有了 Steam 数据库再反查成真正的 packageId。</p>
+  <p>这叫"<b>延迟解析</b>" —— 现在信息不够，先原样存着，等有了更强的工具再翻译。比"解析不了就丢弃"好得多。</p>
+</div>
+
+<h3>diff：对比两个列表</h3>
+
+<p>分享列表时最想知道的是"和我现在差多少"。</p>
+
+<div class="filename">test/stores.test.js:39-40</div>
+<pre><code>const d = s.diff(['core', 'a', 'b', 'c', 'd'], ['core', 'b', 'a', 'd', 'e'])
+assert.deepEqual(d.added, ['e'])</code></pre>
+
+<p>四种差异分开报告：</p>
+
+<table>
+  <thead><tr><th>字段</th><th>含义</th></tr></thead>
+  <tbody>
+    <tr><td><code>added</code></td><td>对方有、我没有</td></tr>
+    <tr><td><code>removed</code></td><td>我有、对方没有</td></tr>
+    <tr><td><code>reordered</code></td><td>两边都有，但顺序不同</td></tr>
+    <tr><td><code>same</code></td><td>完全一样</td></tr>
+  </tbody>
+</table>
+
+<p>注意 <code>reordered</code> 是单独一类的理由：<b>在 mod 管理器里顺序错误会导致游戏崩溃</b>，不只是"不一样"这么简单。</p>
+
+<h2>网络抓取的一处细节</h2>
+
+<p>从 URL 导入列表时，要处理各种粘贴板服务的 URL 变形：</p>
+
+<div class="filename">src/host/service.js:515-527</div>
+<pre><code>const importUrl = async ({ url, name, save = true }) =&gt; {
+  const f = fetchImpl || globalThis.fetch
+  let u = String(url || '').trim()
+  <span class="c">// Normalise common hosts to raw text.</span>
+  u = u.replace(/^https:\/\/github\.com\/([^/]+\/[^/]+)\/blob\//, 'https://raw.githubusercontent.com/$1/')
+  if (/^https:\/\/rentry\.(co|org)\/[\w-]+$/.test(u)) u += '/raw'
+  if (/^https:\/\/gist\.github\.com\//.test(u) &amp;&amp; !/\/raw/.test(u)) u += '/raw'
+  if (/pastebin\.com\/(?!raw)/.test(u)) u = u.replace('pastebin.com/', 'pastebin.com/raw/')
+  const res = await f(u, { headers: { 'user-agent': 'dsh-rimlist' } })
+  if (!res.ok) throw new Error('HTTP ' + res.status + ' fetching ' + u)
+  const text = await res.text()
+  return importText({ text, name, save, url: String(url) })
+}</code></pre>
+
+<p>玩家粘的是<b>浏览页面</b>的 URL，但程序需要<b>原始文本</b>。四个规则各自转换：</p>
+
+<table>
+  <thead><tr><th>服务</th><th>用户粘的</th><th>实际抓的</th></tr></thead>
+  <tbody>
+    <tr><td>GitHub</td><td><code>github.com/u/r/blob/main/x.md</code></td><td><code>raw.githubusercontent.com/u/r/main/x.md</code></td></tr>
+    <tr><td>Rentry</td><td><code>rentry.co/abc</code></td><td><code>rentry.co/abc/raw</code></td></tr>
+    <tr><td>Gist</td><td><code>gist.github.com/...</code></td><td>末尾加 <code>/raw</code></td></tr>
+    <tr><td>Pastebin</td><td><code>pastebin.com/XYZ</code></td><td><code>pastebin.com/raw/XYZ</code></td></tr>
+  </tbody>
+</table>
+
+<div class="tip">
+  <b><code>(?!raw)</code> 是"否定先行断言"</b>
+  <p><code>/pastebin\.com\/(?!raw)/</code> 意思是"pastebin.com/ 后面<b>不是</b> raw"。所以已经带 <code>/raw</code> 的 URL 不会被重复加。<code>/(?!...)/</code> 这个语法 Python 的 <code>re</code> 也支持，写法一模一样。</p>
+</div>
+
+<h2>数据都存在哪</h2>
+
+<div class="tree">~/.dsh/rimlist/
+├── settings.json              全部设置（游戏路径、排序偏好、各数据库配置）
+├── userRules.json             你的自定义规则
+├── modNotes.json              给 mod 写的备注
+├── modHistory.json            版本变化历史（"哪个 mod 昨天更新了"）
+├── debug.log                  调试日志
+│
+├── db/                        ← 规则库缓存
+│   ├── communityRules.json
+│   ├── steamDB.slim.json      ← 注意是 slim：裁过的，只留需要的字段
+│   ├── noVersionWarning-1.6.json
+│   ├── useThisInstead.json
+│   └── rimworldVersions.json
+│
+├── lists/                     ← 命名列表，一个 JSON 一个
+│   └── my-list-a1b2.json
+│
+├── backups/                   ← ModsConfig.xml 时间戳备份
+│   └── ModsConfig.2026-01-15T10-30-00-000Z.xml
+│
+├── modBackups/                ← mod 文件夹快照（工坊没法回滚）
+│   └── &lt;packageId&gt;/&lt;时间戳&gt;/
+│
+└── changelogs/                ← 工坊更新日志缓存</div>
+
+<h3>为什么 steamDB 要"瘦身"</h3>
+
+<div class="filename">src/host/rules.js:161-179</div>
+<pre><code>const slimSteam = (raw) =&gt; {
+  const db = raw &amp;&amp; raw.database ? raw.database : {}
+  const slim = {}
+  for (const [pfid, e] of Object.entries(db)) {
+    if (!e || typeof e !== 'object') continue
+    const packageId = e.packageId || e.packageid
+    slim[pfid] = {
+      p: packageId ? pid(packageId) : undefined,
+      n: e.name || e.steamName || undefined,
+      a: e.authors || undefined,
+      u: e.url || undefined,
+      v: Array.isArray(e.gameVersions) ? e.gameVersions : undefined,
+      d: e.dependencies &amp;&amp; typeof e.dependencies === 'object' ? Object.fromEntries(Object.entries(e.dependencies).map(([k, v]) =&gt; [k, Array.isArray(v) ? v[0] : String(v)])) : undefined,
+      x: e.unpublished ? 1 : undefined,
+      app: e.appid ? 1 : undefined,
+    }
+  }
+  return { version: raw.version || null, database: slim }
+}</code></pre>
+
+<p>原始 steamDB 有几十 MB（每个工坊 mod 的完整信息）。这里只留 8 个字段，<b>键名缩成一个字母</b>（<code>p</code> = packageId，<code>n</code> = name，<code>d</code> = dependencies…）。</p>
+
+<div class="warn">
+  <b>这是有代价的</b>
+  <p>单字母键名省了内存和磁盘，但可读性差了。<b>如果以后要加字段，</b>必须同时改 <code>slimSteam</code> 和 <code>indexSteam</code>（下面那个展开回全名的函数），漏一个就是诡异的 <code>undefined</code>。</p>
+  <p>读这种代码时，把两个函数对照着看：
+  <br>→ <code>slimSteam</code> 写进去什么（第 161 行）
+  <br>→ <code>indexSteam</code> 读出来什么（第 180 行）
+  <br>两边必须一致。</p>
+</div>
+
+<div class="filename">src/host/rules.js:180-191（配对的那一半）</div>
+<pre><code>const indexSteam = (slim) =&gt; {
+  const byPid = new Map()
+  const byPfid = new Map()
+  for (const [pfid, e] of Object.entries(slim.database || {})) {
+    const entry = { pfid, packageId: e.p, name: e.n, authors: e.a, url: e.u, gameVersions: e.v || [], dependencies: e.d || {}, unpublished: !!e.x, isApp: !!e.app }
+    byPfid.set(pfid, entry)
+    if (e.p &amp;&amp; !byPid.has(e.p)) byPid.set(e.p, entry)
+  }
+  state.steam.byPid = byPid
+  state.steam.byPfid = byPfid
+  state.steam.version = slim.version
+}</code></pre>
+
+<p>注意建了<b>两个索引</b>：按 packageId 查（诊断时用），按工坊 ID 查（诊断里的链接用）。同一个 entry 对象被两个 Map 引用 —— 省内存，改一处两边都看到。</p>
+
+<h2>这一页的设计经验</h2>
+
+<div class="grid2">
+  <div class="card">
+    <h4>① 配置形状统一</h4>
+    <p><code>DB_DEFS</code> 里五个库用同一套键名，所以一个 <code>ensure()</code> 处理全部。加新库只要加一条定义。</p>
+  </div>
+  <div class="card">
+    <h4>② 规范化隔离</h4>
+    <p><code>normalizeRules</code> 把五六种原始格式变成一个形状。所有脏活在这一个函数里，下游都是干净数据。</p>
+  </div>
+  <div class="card">
+    <h4>③ 离线优先</h4>
+    <p>先读缓存（一定成功），再后台更新（可能失败）。失败只记 error 字段，不影响功能。</p>
+  </div>
+  <div class="card">
+    <h4>④ 原子写入</h4>
+    <p>所有配置写入都走 <code>.tmp</code> + <code>rename</code>。断电也不会产生坏文件。</p>
+  </div>
+  <div class="card">
+    <h4>⑤ 优先级靠调用顺序</h4>
+    <p><code>rulesFor</code> 里先 community 后 user，后者覆盖前者。<b>没有复杂的优先级数值运算</b>，就靠顺序。</p>
+  </div>
+  <div class="card">
+    <h4>⑥ 互斥自动维护</h4>
+    <p>加 loadAfter 自动删 loadBefore。用户不用懂内部结构，不会产生矛盾状态。</p>
+  </div>
+</div>
+
+<div class="note">
+  <b>下一站</b>
+  <p>现在你有了：扫描出的 <code>catalog</code>、排序算法、规则库、列表管理。这些零件都在 <code>src/host/</code> 里各自独立。下一张页看把它们串起来的 <code>service.js</code> —— 也是最大的那个文件。</p>
+</div>
+
+<div class="pager">
+  <a href="04-sort.html"><span>上一页</span>← 4 · 排序与诊断</a>
+  <a href="06-service.html" class="nx"><span>下一页</span>6 · service.js →</a>
+</div>
+
+</main>
+</body>
+</html>

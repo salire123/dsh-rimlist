@@ -1,0 +1,686 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>4 · 排序与诊断 · RimList 代码导读</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="side">
+  <div class="brand">
+    <b>RimList 代码导读</b>
+    <span>写给会一点 Python 的人</span>
+  </div>
+  <a href="index.html">0 · 先看这里</a>
+  <a href="01-js.html">1 · JS 速通</a>
+  <a href="02-entry.html">2 · 入口 index.js</a>
+  <a href="03-scan.html">3 · 扫描 mod</a>
+  <a href="04-sort.html" class="on">4 · 排序与诊断</a>
+  <a href="05-rules.html">5 · 规则库与列表</a>
+  <a href="06-service.html">6 · service.js</a>
+  <a href="07-client.html">7 · 前端 React</a>
+  <a href="08-hands-on.html">8 · 动手改与测试</a>
+  <div class="side-foot">
+    文件：<code>src/host/sorter.js</code>（387 行）<br>
+    <b>这一页是整个项目最值得读的部分。</b>算法不难，但设计取舍很多。
+  </div>
+</nav>
+
+<main>
+
+<div class="kicker">第 4 页 · 核心算法</div>
+
+<h1>
+  排序与诊断
+  <span class="sub">387 行，做两件事：算出正确的加载顺序，以及指出现在有什么问题。算法本身是教科书内容，难的是"优先级"这套设计。</span>
+</h1>
+
+<h2>问题是什么</h2>
+
+<p>假设你有三个 mod：</p>
+
+<div class="flow">Harmony      → 声称必须在 Core 之前加载（loadBefore: ludeon.rimworld）
+Core         → 游戏本体
+Vanilla Expanded → 依赖 Harmony
+
+问：正确顺序是什么？
+答：Harmony → Core → Vanilla Expanded</div>
+
+<p>三个 mod 很简单。但真实玩家有 <b>300 个 mod</b>，每个都可能声明几条规则，还有社区规则库、自己的自定义规则、mod 之间的依赖关系……<b>这就是一个有向图，要求一个合法的线性顺序</b>。学名：拓扑排序（topological sort）。</p>
+
+<div class="note">
+  <b>先理解"边"的方向</b>
+  <p>代码里统一约定：一条边 <code>A → B</code> 意思是 <b>A 必须在 B 之前加载</b>。<br>
+  所以 <code>mod.loadAfter = ['brrainz.harmony']</code> 产生的是边 <code>harmony → thisMod</code>。<b>注意方向是反的</b> —— 说"我在 X 之后"就是"X 在我之前"。这是初读最容易搞混的地方，代码里用 <code>addEdge(t, key, ...)</code> 明确表达了这一点。</p>
+</div>
+
+<h2>第一步：建图</h2>
+
+<div class="filename">src/host/sorter.js:34-80</div>
+<pre><code>export function buildGraph(activeKeys, catalog, ruleStore) {
+  const active = new Set(activeKeys)
+  const edges = new Map()
+  const tiers = new Map()
+  const addEdge = (before, after, source, comment) =&gt; {
+    const a = pid(before)
+    const b = pid(after)
+    if (!active.has(a) || !active.has(b) || a === b) return
+    const k = a + '&gt;' + b
+    const prev = edges.get(k)
+    if (!prev || PRIORITY[source] &lt; PRIORITY[prev.source]) edges.set(k, { from: a, to: b, source, priority: PRIORITY[source], comment })
+  }
+  for (const key of active) {
+    const mod = catalog.get(key)
+    const rules = ruleStore ? ruleStore.rulesFor(key) : { loadAfter: {}, loadBefore: {}, incompatibleWith: {} }
+    tiers.set(key, mod ? tierOf(mod, rules) : 3)
+    if (!mod) continue
+    for (const t of mod.forceLoadAfter) addEdge(t, key, 'force')
+    for (const t of mod.forceLoadBefore) addEdge(key, t, 'force')
+    for (const t of mod.loadAfter) addEdge(t, key, 'about')
+    for (const t of mod.loadBefore) addEdge(key, t, 'about')
+    for (const d of mod.modDependencies) addEdge(d.packageId, key, 'dependency')
+    for (const [t, info] of Object.entries(rules.loadAfter)) addEdge(t, key, info.source === 'user' ? 'user' : 'community', info.comment)
+    for (const [t, info] of Object.entries(rules.loadBefore)) addEdge(key, t, info.source === 'user' ? 'user' : 'community', info.comment)
+  }
+  ...</code></pre>
+
+<h3><code>addEdge</code> 的三个设计决策</h3>
+
+<div class="kv">
+  <div>
+    <span class="k">① 只关心已启用的</span>
+    <span class="v"><code>if (!active.has(a) || !active.has(b)) return</code> —— 未启用的 mod 不参与。这个检查很重要：如果有人写了 <code>loadAfter: ['某未启用mod']</code>，那条边被忽略，不会导致排序死锁。<b>而且这是每次 addEdge 都检查，所以调用方不用操心。</b></span>
+  </div>
+  <div>
+    <span class="k">② 同一对 mod 只保留最强约束</span>
+    <span class="v"><code>if (!prev || PRIORITY[source] &lt; PRIORITY[prev.source])</code>：如果 <code>a→b</code> 这条边已经存在，只有当新来源<b>优先级更高</b>（数值更小）时才覆盖。<br>这样一条边同时被 About.xml 和社区规则要求时，会标记成 <code>source: 'about'</code>（更权威）。</span>
+  </div>
+  <div>
+    <span class="k">③ 自己到自己 → 丢弃</span>
+    <span class="v"><code>a === b</code> 直接 return。有些 mod 会荒唐地写 <code>loadAfter</code> 自己，不拦会导致后面算法出问题。</span>
+  </div>
+</div>
+
+<h3>优先级表：这个项目的核心业务逻辑</h3>
+
+<div class="filename">src/host/sorter.js:24</div>
+<pre><code>const PRIORITY = { force: 0, user: 1, about: 2, community: 3, dependency: 4 }</code></pre>
+
+<table>
+  <thead><tr><th>数字</th><th>来源</th><th>含义</th><th>翻成中文</th></tr></thead>
+  <tbody>
+    <tr><td>0</td><td><code>force</code></td><td><code>forceLoadAfter</code> / <code>forceLoadBefore</code></td><td>"我<b>必须</b>"，作者亲自写死，永远不破</td></tr>
+    <tr><td>1</td><td><code>user</code></td><td>你自己在界面上加的规则</td><td>"我<b>要</b>这样"，用户说了算</td></tr>
+    <tr><td>2</td><td><code>about</code></td><td>About.xml 的 <code>loadAfter</code> / <code>loadBefore</code></td><td>"我<b>希望</b>这样"，作者的建议</td></tr>
+    <tr><td>3</td><td><code>community</code></td><td>RimSort 社区规则库</td><td>"<b>大家发现</b>应该这样"，众包经验</td></tr>
+    <tr><td>4</td><td><code>dependency</code></td><td><code>modDependencies</code></td><td>"我<b>没有它就跑不了</b>"，但引擎会自动处理，排序上最软</td></tr>
+  </tbody>
+</table>
+
+<div class="warn">
+  <b>为什么 dependency 优先级最低？</b>
+  <p>直觉上"依赖"应该最强 —— 没有 Harmony，别的 mod 根本跑不起来。但注意两点：</p>
+  <ol style="margin-bottom:0">
+    <li>依赖关系有<b>硬保证</b>：游戏引擎加载时会自己解析依赖。排序只是让它在列表里看起来对。</li>
+    <li>有些 mod 会<b>错误地</b>声明依赖（比如声明依赖某个可选 mod），或者依赖方向和其他规则冲突。这时如果把 dependency 排最高，会强行制造矛盾。</li>
+  </ol>
+  <p>所以设计取舍是：<b>作者明确写的 &gt; 用户要的 &gt; 社区建议 &gt; 自动推导出来的</b>。人工声明的优先级高于机器推导的，这是很合理的原则。</p>
+</div>
+
+<h3>分组成 tier（层）</h3>
+
+<div class="filename">src/host/sorter.js:26-32</div>
+<pre><code>function tierOf(mod, rules) {
+  if (mod.key === CORE_ID) return 0
+  if (mod.kind === 'expansion' || mod.key in KNOWN_EXPANSIONS) return 0
+  if (rules.loadTop) return 1
+  if (rules.loadBottom) return 3
+  return 2
+}</code></pre>
+
+<table>
+  <thead><tr><th>tier</th><th>谁</th><th>例子</th></tr></thead>
+  <tbody>
+    <tr><td>0</td><td>Core + 官方 DLC + 必须在它们之前的东西</td><td>Harmony、Prepatcher、Core、Royalty…</td></tr>
+    <tr><td>1</td><td>标了 <code>loadTop</code> 的</td><td>框架类：XML Extensions、HugsLib</td></tr>
+    <tr><td>2</td><td>普通 mod（绝大多数）</td><td>—</td></tr>
+    <tr><td>3</td><td>标了 <code>loadBottom</code> 的</td><td>RocketMan（性能补丁）、各种 patch 合集</td></tr>
+  </tbody>
+</table>
+
+<div class="tip">
+  <b>为什么要分层，而不干脆一个图全排了？</b>
+  <p>因为 <b>tier 是"不可协商的意图"</b>。RocketMan 声称要 loadBottom，意思是"我必须最后加载"。如果只靠边，一旦某个规则冲突，算法可能把它排到中间 —— 那就破了它的核心约定。</p>
+  <p>分层让"必须最前 / 必须最后"这类意图变成结构上的保证，而不是靠图算法碰运气。<b>这是很实用的工程妥协</b>：把不可协商的先固定下来，剩下的在图里慢慢排。</p>
+</div>
+
+<h3>把 Harmony 提拔进 tier 0</h3>
+
+<p>看这段代码，它是整个文件里最"有想法"的部分：</p>
+
+<div class="filename">src/host/sorter.js:67-78</div>
+<pre><code><span class="c">// Promote into tier 0 anything that must load before a tier-0 mod (Harmony and
+// loaders declare loadBefore Core). Iterate to a fixpoint for chains.</span>
+let changed = true
+while (changed) {
+  changed = false
+  for (const e of edges.values()) {
+    if (tiers.get(e.to) === 0 &amp;&amp; tiers.get(e.from) !== 0) {
+      tiers.set(e.from, 0)
+      changed = true
+    }
+  }
+}</code></pre>
+
+<p>逻辑：<b>如果 X 必须在某个 tier-0 mod 之前，那 X 也是 tier 0。</b></p>
+
+<p>Harmony 的 About.xml 里写 <code>loadBefore: ludeon.rimworld</code>。Core 是 tier 0，所以 Harmony 也被提拔成 tier 0。</p>
+
+<div class="note">
+  <b>为什么用 <code>while (changed)</code> 循环？</b>
+  <p>因为可能有<b>链</b>：A 在 B 前，B 在 Core 前。第一轮：B 被提拔（因为 Core 是 tier 0）。第二轮：A 被提拔（因为 B 现在是 tier 0）。直到一轮下来没有任何变化（fixpoint，不动点）才停。</p>
+  <p>这叫"传递闭包"的迭代算法。Python 里你会写类似 <code>while changed: ...</code>，一模一样。</p>
+</div>
+
+<h2>第二步：拓扑排序</h2>
+
+<div class="filename">src/host/sorter.js:82-133</div>
+<pre><code>function topo(keys, edgeList, order) {
+  const pos = new Map(keys.map((k, i) =&gt; [k, order.has(k) ? order.get(k) : 1e9 + i]))
+  const indeg = new Map(keys.map((k) =&gt; [k, 0]))
+  const out = new Map(keys.map((k) =&gt; [k, []]))
+  const set = new Set(keys)
+  let edges = edgeList.filter((e) =&gt; set.has(e.from) &amp;&amp; set.has(e.to))
+  const broken = []
+
+  const run = () =&gt; {
+    for (const k of keys) {
+      indeg.set(k, 0)
+      out.set(k, [])
+    }
+    for (const e of edges) {
+      indeg.set(e.to, indeg.get(e.to) + 1)
+      out.get(e.from).push(e.to)
+    }
+    const ready = keys.filter((k) =&gt; indeg.get(k) === 0).sort((a, b) =&gt; pos.get(a) - pos.get(b))
+    const result = []
+    while (ready.length) {
+      const k = ready.shift()
+      result.push(k)
+      for (const n of out.get(k)) {
+        indeg.set(n, indeg.get(n) - 1)
+        if (indeg.get(n) === 0) {
+          <span class="c">// insert keeping ready sorted by original position</span>
+          let i = 0
+          while (i &lt; ready.length &amp;&amp; pos.get(ready[i]) &lt;= pos.get(n)) i++
+          ready.splice(i, 0, n)
+        }
+      }
+    }
+    return result
+  }
+  ...</code></pre>
+
+<p>这就是著名的 <b>Kahn 算法</b>。如果你没学过，用一句话理解：</p>
+
+<div class="note">
+  <b>Kahn 算法的直觉</b>
+  <p>反复做这件事：<b>找出所有"没有前置要求"的节点，输出它，然后把它从图里删掉</b>（也就是让它的后继少一个前置）。直到图空。</p>
+  <p>好比做菜：先做所有不需要等别的菜做好的步骤。做完一道，可能就解锁了下一道。</p>
+</div>
+
+<h3>逐步走一遍</h3>
+
+<p>假设有这些边（A 必须在 B 前）：</p>
+<div class="flow">harmony → core
+core → vanilla_expanded
+harmony → some_lib
+some_lib → vanilla_expanded</div>
+
+<p>初始状态，<code>indeg</code>（入度 = 有几个前置要求）：</p>
+
+<table>
+  <thead><tr><th>mod</th><th>入度</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>harmony</td><td>0</td><td>没人要求它在别人后面 → <b>可以立即输出</b></td></tr>
+    <tr><td>core</td><td>1</td><td>要等 harmony</td></tr>
+    <tr><td>some_lib</td><td>1</td><td>要等 harmony</td></tr>
+    <tr><td>vanilla_expanded</td><td>2</td><td>要等 core 和 some_lib</td></tr>
+  </tbody>
+</table>
+
+<ol class="steps">
+  <li><b>ready = [harmony]</b> → 输出 harmony。harmony 的后继是 core 和 some_lib，两者入度各减 1 → 都变成 0，加入 ready。</li>
+  <li><b>ready = [core, some_lib]</b>（按 <code>pos</code> 排序决定谁先）。假设输出 core。core 的后继 vanilla_expanded 入度减 1 → 变成 1（还要等 some_lib）。</li>
+  <li><b>ready = [some_lib]</b> → 输出。vanilla_expanded 入度减 1 → 变成 0，加入 ready。</li>
+  <li><b>ready = [vanilla_expanded]</b> → 输出。</li>
+</ol>
+
+<p>最终顺序：<code>harmony → core → some_lib → vanilla_expanded</code>。✓</p>
+
+<h3>那个 <code>splice</code> 循环在干什么</h3>
+
+<pre><code>if (indeg.get(n) === 0) {
+  <span class="c">// insert keeping ready sorted by original position</span>
+  let i = 0
+  while (i &lt; ready.length &amp;&amp; pos.get(ready[i]) &lt;= pos.get(n)) i++
+  ready.splice(i, 0, n)
+}</code></pre>
+
+<p>它在<b>保持 <code>ready</code> 数组有序</b>。为什么不直接 <code>ready.push(n); ready.sort()</code>？因为那样每次都要全排一遍。这里用插入排序的位置查找，因为数组通常很短。</p>
+
+<p>为什么要保持有序？为了让"同时可选的 mod"按 <code>pos</code> 决定的顺序输出 —— 这就是 <b>tie-break（平局裁决）</b>，下一节讲。</p>
+
+<h2>tie-break：没有约束的 mod 谁先谁后</h2>
+
+<p>拓扑排序只保证"该在前的在前"，但<b>没有约束关系的 mod 之间，顺序是自由的</b>。自由就会乱 —— 每次排序结果不同会让用户困惑。所以需要一条规则。</p>
+
+<div class="filename">src/host/sorter.js:169-175</div>
+<pre><code>const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: true })
+const sortName = (k, catalog) =&gt; (catalog.get(k)?.name || k).trim()
+/** Keys ranked by the lowest-priority criterion. */
+export function tieBreakOrder(keys, catalog, tieBreak = 'name') {
+  if (tieBreak !== 'name') return [...keys]
+  return [...keys].sort((a, b) =&gt; collator.compare(sortName(a, catalog), sortName(b, catalog)) || collator.compare(a, b))
+}</code></pre>
+
+<table>
+  <thead><tr><th>模式</th><th>行为</th><th>什么时候用</th></tr></thead>
+  <tbody>
+    <tr><td><code>'name'</code>（默认）</td><td>按名字字母序。<code>Intl.Collator</code> 带 <code>numeric: true</code>，所以 "Mod 9" 排在 "Mod 10" 前面（自然序）</td><td>想要稳定、可预测的结果</td></tr>
+    <tr><td><code>'current'</code></td><td>保持当前相对顺序，只移动必须移动的</td><td>已经手工排好了，只想修正错误</td></tr>
+    <tr><td><code>'rimsort'</code></td><td>完整复刻 RimSort 的算法（另一条代码路径）</td><td>和 RimSort 用户交流时保持一致</td></tr>
+  </tbody>
+</table>
+
+<div class="tip">
+  <b><code>Intl.Collator</code> 是个好东西</b>
+  <p><code>new Intl.Collator(undefined, { numeric: true })</code> 创建一个"本地化排序器"。它能正确处理中文拼音序、数字自然序、重音符号。比 <code>a.localeCompare(b)</code> 快得多（因为一次创建重复使用）。</p>
+  <p>文件最后那个 <code>|| collator.compare(a, b)</code> 是兜底：名字完全相同时按 key 排，保证结果<b>绝对确定</b>（不会因为原数组顺序不同而不同）。</p>
+</div>
+
+<h2>第三步：破环</h2>
+
+<p>拓扑排序有个前提：<b>图里不能有环</b>。但现实中一定会有 —— 两个 mod 互相声明要在对方之后加载，这就是矛盾。</p>
+
+<div class="filename">src/host/sorter.js:118-132</div>
+<pre><code>let result = run()
+let guard = 0
+while (result.length &lt; keys.length &amp;&amp; guard++ &lt; 200) {
+  <span class="c">// Find one cycle among remaining nodes and drop its weakest edge.</span>
+  const remaining = new Set(keys.filter((k) =&gt; !result.includes(k)))
+  const cycEdges = edges.filter((e) =&gt; remaining.has(e.from) &amp;&amp; remaining.has(e.to))
+  const cycle = findCycle(cycEdges, remaining)
+  if (!cycle.length) break
+  const weakest = cycle.reduce((w, e) =&gt; (e.priority &gt;= w.priority ? e : w))
+  broken.push({ cycle: cycle.map((e) =&gt; e.from + ' → ' + e.to), dropped: weakest })
+  edges = edges.filter((e) =&gt; e !== weakest)
+  result = run()
+}
+if (result.length &lt; keys.length) for (const k of keys) if (!result.includes(k)) result.push(k)
+return { order: result, broken }</code></pre>
+
+<p>策略：<b>找到一个环，删掉环里优先级最低的那条边，重跑。</b>删掉的记进 <code>broken</code>，最后报告给用户。</p>
+
+<div class="kv">
+  <div><span class="k"><code>guard++ &lt; 200</code></span><span class="v">防止死循环的保险。万一 <code>findCycle</code> 有 bug 一直找不到环，最多试 200 次就放弃。</span></div>
+  <div><span class="k"><code>cycle.reduce((w, e) =&gt; (e.priority &gt;= w.priority ? e : w))</code></span><span class="v">在环里找 <code>priority</code> 数值最大的（也就是最弱的）那条边。<code>&gt;=</code> 而不是 <code>&gt;</code> 意味着同优先级时取<b>后</b>一个。Python: <code>max(cycle, key=lambda e: e.priority)</code>。</span></div>
+  <div><span class="k"><code>edges = edges.filter((e) =&gt; e !== weakest)</code></span><span class="v">对象引用比较，删掉那个具体的边对象。剩下的保持不可变风格。</span></div>
+  <div><span class="k">最后一行的兜底</span><span class="v">如果 200 次还没搞定，剩下的直接按原顺序追加，保证<b>一定返回全部 mod</b>。宁可顺序不对，不能丢 mod。</span></div>
+</div>
+
+<h3>找环的算法：DFS + 三色标记</h3>
+
+<div class="filename">src/host/sorter.js:135-167</div>
+<pre><code>function findCycle(edges, nodes) {
+  const adj = new Map()
+  for (const e of edges) {
+    if (!adj.has(e.from)) adj.set(e.from, [])
+    adj.get(e.from).push(e)
+  }
+  const state = new Map()
+  const stack = []
+  let found = null
+  const dfs = (n) =&gt; {
+    if (found) return
+    state.set(n, 1)
+    for (const e of adj.get(n) || []) {
+      if (found) return
+      if (state.get(e.to) === 1) {
+        const i = stack.findIndex((x) =&gt; x.from === e.to)
+        found = [...stack.slice(i), e]
+        return
+      }
+      if (!state.has(e.to)) {
+        stack.push(e)
+        dfs(e.to)
+        stack.pop()
+      }
+    }
+    state.set(n, 2)
+  }
+  for (const n of nodes) {
+    if (found) break
+    if (!state.has(n)) dfs(n)
+  }
+  return found || []
+}</code></pre>
+
+<p>状态标记：<b>没记录 = 没访问过，1 = 正在访问（在当前路径上），2 = 访问完了</b>。</p>
+
+<div class="note">
+  <b>关键在这一句</b>
+  <p><code>if (state.get(e.to) === 1)</code> —— 如果目标节点"正在访问中"，说明我们从它出发绕了一圈又回来了，<b>这就是环</b>。</p>
+  <p>如果只是"访问过"（状态 2），那是正常的共享路径，不是环。这个区分是 DFS 找环的核心。Python 里你会写一模一样的递归。</p>
+</div>
+
+<p>然后 <code>stack.findIndex((x) =&gt; x.from === e.to)</code> 从栈里找出环的起点，<code>[...stack.slice(i), e]</code> 把环切出来。</p>
+
+<h2>RimSort 兼容模式</h2>
+
+<p>文件里还有一整个独立的算法 <code>sortRimSort</code>（191-260 行），它不按优先级排序，而是<b>逐字复刻 RimSort 的行为</b>。为什么？</p>
+
+<div class="filename">src/host/sorter.js:177-190（注释解释了原因）</div>
+<pre><code>/**
+ * Faithful port of RimSort's "Topological" sort (app/controllers/sort_controller.py,
+ * app/sort/topo_sort.py, CompiledDependencyData.build) with
+ * use_moddependencies_as_loadTheseBefore = true:
+ *   - one graph = union of About.xml + community + user loadAfter/loadBefore (no priorities)
+ *   - modDependencies added as loadAfter unless an explicit rule says the opposite
+ *   - tier0 = known Ludeon/Harmony ids + their recursive deps; tier1 = known frameworks
+ *     + loadTop + their recursive deps; tier3 = loadBottom + everything that loads after them
+ *   - per tier: level-by-level toposort, each level sorted by lowercase name
+ * On a cycle RimSort refuses to sort; we fall back to the priority-aware greedy sort.
+ */</code></pre>
+
+<p>差异对比：</p>
+
+<table>
+  <thead><tr><th></th><th>默认模式（<code>sortLoadOrder</code>）</th><th>RimSort 模式（<code>sortRimSort</code>）</th></tr></thead>
+  <tbody>
+    <tr><td>规则冲突时</td><td>按优先级挑一个</td><td>一视同仁，无优先级</td></tr>
+    <tr><td>层内排序</td><td>Kahn + tie-break</td><td>逐层（level-by-level）拓扑</td></tr>
+    <tr><td>遇到环</td><td>删最弱边，继续</td><td><b>直接放弃</b>，退回默认算法（<code>rimsortCycle</code> 标记）</td></tr>
+    <tr><td>目的</td><td>尽量排出最好的顺序</td><td>和 RimSort 结果一致</td></tr>
+  </tbody>
+</table>
+
+<p>"逐层"是什么意思？看这段：</p>
+
+<div class="filename">src/host/sorter.js:237-251</div>
+<pre><code>for (const tier of [t0, t1, t2, t3]) {
+  const left = new Map([...tier].map((k) =&gt; [k, new Set([...deps.get(k)].filter((d) =&gt; tier.has(d)))]))
+  while (left.size) {
+    const level = [...left.keys()].filter((k) =&gt; left.get(k).size === 0)
+    if (!level.length) {
+      <span class="c">// cycle: RimSort aborts ("Unable to Sort"); fall back to the greedy sorter</span>
+      const r = sortLoadOrder(keys, catalog, ruleStore, { tieBreak: 'name' })
+      return { ...r, rimsortCycle: [...left.keys()] }
+    }
+    level.sort(cmp)
+    for (const k of level) left.delete(k)
+    for (const s of left.values()) for (const k of level) s.delete(k)
+    order.push(...level)
+  }
+}</code></pre>
+
+<p>这是"BFS 式"的拓扑排序：<b>一次取出一整层"已就绪"的 mod，整层排序后输出，再解锁下一层</b>。而前面的 Kahn 算法是"一次取一个"。两者结果通常相同，但同层内的排序规则不同。</p>
+
+<div class="tip">
+  <b>这段代码在模仿一个 Python 文件</b>
+  <p>注释直接写了 <code>app/sort/topo_sort.py</code> —— RimSort 是 Python 写的。你在读的是一个"把 Python 算法翻译成 JS"的案例，正好可以对照着看两个语言的差异。</p>
+</div>
+
+<h2>诊断：找出问题，不只是排序</h2>
+
+<p>排序解决"顺序对不对"，但还有别的问题：缺依赖、版本不匹配、不兼容、mod 没装。这些归 <code>diagnose()</code> 管。</p>
+
+<div class="filename">src/host/sorter.js:296-310</div>
+<pre><code>export function diagnose(activeKeys, catalog, ruleStore, { gameMajor, duplicates = [] } = {}) {
+  const keys = activeKeys.map(pid)
+  const active = new Set(keys)
+  const posOf = new Map(keys.map((k, i) =&gt; [k, i]))
+  const pairs = new Set()
+  /** true the first time an unordered pair is seen (so each incompatibility is reported once). */
+  const seenPair = (a, b) =&gt; {
+    const id = a &lt; b ? a + '|' + b : b + '|' + a
+    if (pairs.has(id)) return false
+    pairs.add(id)
+    return true
+  }
+  const issues = []
+  const nameOf = (k) =&gt; catalog.get(k)?.name || ruleStore?.steamByPid(k)?.name || k
+  const push = (level, code, mod, message, extra = {}) =&gt; issues.push({ level, code, mod, modName: nameOf(mod), message, ...extra })</code></pre>
+
+<p><b>三个共享的辅助结构</b>，每个都有明确目的：</p>
+
+<div class="kv">
+  <div><span class="k"><code>posOf</code></span><span class="v">key → 位置索引。后面判"应该在前面的却在后面"靠它。O(1) 查询，比每次 <code>indexOf</code> 快。</span></div>
+  <div><span class="k"><code>seenPair</code></span><span class="v">记录已报告过的"无序对"。因为不兼容是<b>双向</b>的：A 不兼容 B，检查 A 时报告一次，检查 B 时又会报告一次。<code>a &lt; b ? ... : ...</code> 保证两种方向生成同一个 id。</span></div>
+  <div><span class="k"><code>push()</code></span><span class="v">统一的问题构造函数。自动补 <code>modName</code>，收尾再算 counts。所有错误都长一个形状，界面好渲染。</span></div>
+</div>
+
+<h3>每一条检查</h3>
+
+<table>
+  <thead><tr><th>code</th><th>级别</th><th>检查什么</th></tr></thead>
+  <tbody>
+    <tr><td><code>missing-core</code></td><td>error</td><td>Core 居然没启用（基本不可能，但检查一下）</td></tr>
+    <tr><td><code>missing-mod</code></td><td>error</td><td>mod 列表里有它，但磁盘上没有 → 被 Steam 取消订阅了</td></tr>
+    <tr><td><code>invalid-about</code></td><td>warning</td><td>About.xml 解析失败或没有 packageId</td></tr>
+    <tr><td><code>version-mismatch</code></td><td>warning</td><td>没声明支持当前游戏版本</td></tr>
+    <tr><td><code>version-nvw</code></td><td>info</td><td>同样情况，但 NoVersionWarning 库说它其实能用（降级为"提示"）</td></tr>
+    <tr><td><code>use-this-instead</code></td><td>info</td><td>有维护中的接替版本</td></tr>
+    <tr><td><code>dependency-missing</code></td><td>error</td><td>依赖的 mod 没装</td></tr>
+    <tr><td><code>dependency-inactive</code></td><td>error</td><td>装了但没启用</td></tr>
+    <tr><td><code>order-dependency</code></td><td>warning</td><td>顺序反了：依赖排在它后面</td></tr>
+    <tr><td><code>order-force</code></td><td>error</td><td>违反了强制规则（最严重）</td></tr>
+    <tr><td><code>order-about</code></td><td>warning</td><td>违反了 About.xml 的普通规则</td></tr>
+    <tr><td><code>order-rule</code></td><td>warning</td><td>违反了社区/自定义规则</td></tr>
+    <tr><td><code>incompatible</code></td><td>error</td><td>两个不兼容的 mod 同时启用</td></tr>
+    <tr><td><code>steam-dependency</code></td><td>warning</td><td>工坊页面声明了依赖，但 About.xml 没写（补漏网之鱼）</td></tr>
+    <tr><td><code>duplicate</code></td><td>info</td><td>同一个 mod 装了多份</td></tr>
+  </tbody>
+</table>
+
+<p>看两个有代表性的实现：</p>
+
+<div class="filename">src/host/sorter.js:341-354（依赖检查）</div>
+<pre><code>for (const d of mod.modDependencies) {
+  const dk = pid(d.packageId)
+  if (!active.has(dk)) {
+    const installed = catalog.has(dk)
+    const steam = ruleStore?.steamByPid(dk)
+    const pfidFromUrl = d.steamWorkshopUrl?.match(/(\d{6,})/)?.[1] || null
+    push('error', installed ? 'dependency-inactive' : 'dependency-missing', k,
+      installed ? `Requires "${d.displayName}" (${dk}) which is installed but not active` : `Requires "${d.displayName}" (${dk}) which is not installed`,
+      { target: dk, targetName: d.displayName, steam: { pfid: steam?.pfid || pfidFromUrl, url: steam?.url || d.steamWorkshopUrl || d.downloadUrl }, fix: installed ? 'activate' : 'subscribe' })
+  } else if (posOf.get(dk) &gt; posOf.get(k)) {
+    push('warning', 'order-dependency', k, `Should load after its dependency "${nameOf(dk)}"`, { target: dk, fix: 'sort' })
+  }
+}</code></pre>
+
+<p>这段很值得学，因为它<b>一次检查了三种情况</b>，而且每种都给出了可操作的修复建议：</p>
+
+<table>
+  <thead><tr><th>情况</th><th>level</th><th><code>fix</code> 字段</th><th>界面能做什么</th></tr></thead>
+  <tbody>
+    <tr><td>没装</td><td>error</td><td><code>'subscribe'</code></td><td>显示"订阅"按钮，跳到工坊页</td></tr>
+    <tr><td>装了但没启用</td><td>error</td><td><code>'activate'</code></td><td>显示"启用"按钮，一键加进列表</td></tr>
+    <tr><td>顺序不对</td><td>warning</td><td><code>'sort'</code></td><td>显示"排序"按钮</td></tr>
+  </tbody>
+</table>
+
+<div class="tip">
+  <b><code>fix</code> 字段是个好设计</b>
+  <p>诊断不只是"告诉你哪里错了"，而是"告诉你错在哪 + 给出修复的机器可读指令"。界面截获 <code>fix</code> 就知道该画什么按钮。这个思路值得抄到任何项目里。</p>
+</div>
+
+<p>再看不兼容检查里的"用户规则"分支：</p>
+
+<div class="filename">src/host/sorter.js:363-366</div>
+<pre><code>if (ruleStore) {
+  const r = ruleStore.rulesFor(k)
+  for (const [t, info] of Object.entries(r.incompatibleWith)) if (active.has(t) &amp;&amp; seenPair(k, t) &amp;&amp; info.source !== 'user' &amp;&amp; !ruleStore.ignoresIncompatible(k, t)) push('error', 'incompatible', k, `Incompatible with "${nameOf(t)}" (${info.source} rules${info.comment ? ': ' + info.comment : ''})`, { target: t, source: info.source, fix: 'ignore' })
+  for (const [t, info] of Object.entries(r.incompatibleWith)) if (active.has(t) &amp;&amp; info.source === 'user' &amp;&amp; seenPair(k, t)) push('error', 'incompatible', k, `Incompatible with "${nameOf(t)}" (your rule${info.comment ? ': ' + info.comment : ''})`, { target: t, source: 'user' })
+}</code></pre>
+
+<p>为什么分两个循环？因为<b>用户自己加的规则不能被 <code>ignoreIncompatible</code> 忽略掉</b> —— 你自己说不兼容，那就得当真，不给你"忽略"这个选项。又是一处"人工声明优先于自动化"的体现。</p>
+
+<h2>跑起来验证</h2>
+
+<div class="filename">scripts/check-sort.mjs:41-58（节选）</div>
+<pre><code>const cfg = parseModsConfig(await readFile(path.join(paths.configDir, 'ModsConfig.xml'), 'utf8'))
+const active = cfg.activeMods.map(pid)
+console.log('active', active.length)
+
+const t2 = Date.now()
+const diag = diagnose(active, byId, store, { gameMajor: ver?.major, duplicates })
+console.log('diagnose', Date.now() - t2, 'ms', diag.counts)
+for (const i of diag.issues.slice(0, 25)) console.log(' ', i.level.padEnd(7), i.code.padEnd(20), ...)
+
+const t3 = Date.now()
+const sorted = sortLoadOrder(active, byId, store)
+console.log('sort', Date.now() - t3, 'ms', 'moved', sorted.moved, 'broken cycles', sorted.broken.length, ...)
+for (const b of sorted.broken) console.log('  cycle:', b.cycle.join(' ; '), '| dropped', b.dropped.source, ...)
+...
+const again = sortLoadOrder(sorted.order, byId, store)
+console.log('idempotent:', again.moved === 0)</code></pre>
+
+<p>注意最后两行：<b>对已排序的结果再排一次，应该移动 0 个。</b>这叫<b>幂等性</b>（idempotent），是排序算法的关键性质 —— 如果每次点"排序"结果都变，用户会疯掉。</p>
+
+<div class="note">
+  <b>这是个很好的验证思路</b>
+  <p>任何"整理/排序/格式化"类功能，都该能通过这个测试：整理两次 = 整理一次。写测试时优先加这一条。</p>
+</div>
+
+<h2>单元测试怎么写的</h2>
+
+<p>看排序算法的测试，能学到怎么测纯函数：</p>
+
+<div class="filename">test/sorter.test.js:1-41</div>
+<pre><code>import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { sortLoadOrder, diagnose } from '../src/host/sorter.js'
+
+const mod = (key, extra = {}) =&gt; ({
+  key,
+  packageId: key,
+  name: key,
+  kind: key === 'ludeon.rimworld' ? 'core' : key.startsWith('ludeon.rimworld.') ? 'expansion' : 'mod',
+  source: 'workshop',
+  supportedVersions: ['1.6'],
+  loadFolderVersions: [],
+  loadAfter: [],
+  loadBefore: [],
+  forceLoadAfter: [],
+  forceLoadBefore: [],
+  incompatibleWith: [],
+  modDependencies: [],
+  invalid: null,
+  ...extra,       <span class="c">// ← 关键：允许覆盖任何字段</span>
+})
+const catalogOf = (...mods) =&gt; new Map(mods.map((m) =&gt; [m.key, m]))
+const fakeRules = (rules = {}) =&gt; ({
+  rulesFor: (k) =&gt; ({ loadAfter: {}, loadBefore: {}, incompatibleWith: {}, loadTop: null, loadBottom: null, ...(rules[k] || {}) }),
+  steamByPid: () =&gt; undefined,
+  steamByPfid: () =&gt; undefined,
+  nvwCovers: () =&gt; false,
+})
+
+test('core first, expansions in canonical order, harmony promoted before core', () =&gt; {
+  const cat = catalogOf(
+    mod('ludeon.rimworld'),
+    mod('ludeon.rimworld.biotech'),
+    mod('ludeon.rimworld.royalty'),
+    mod('brrainz.harmony', { loadBefore: ['ludeon.rimworld'] }),
+    mod('some.mod'),
+  )
+  const r = sortLoadOrder(['some.mod', 'ludeon.rimworld.biotech', 'ludeon.rimworld', 'brrainz.harmony', 'ludeon.rimworld.royalty'], cat, fakeRules())
+  assert.deepEqual(r.order, ['brrainz.harmony', 'ludeon.rimworld', 'ludeon.rimworld.royalty', 'ludeon.rimworld.biotech', 'some.mod'])
+  assert.equal(r.broken.length, 0)
+})</code></pre>
+
+<p>三个技巧：</p>
+
+<ol class="steps">
+  <li>
+    <b><code>mod()</code> 工厂函数 + <code>...extra</code> 覆盖</b><br>
+    所有字段给默认值，测试时只写要改的那个：<code>mod('brrainz.harmony', { loadBefore: [...] })</code>。<b>不用每次都写全 15 个字段。</b>
+  </li>
+  <li>
+    <b><code>catalogOf(...mods)</code> 用可变参数</b><br>
+    <code>...mods</code> 收集所有参数成数组（就是 Python 的 <code>*args</code>）。调用时 <code>catalogOf(a, b, c)</code> 比 <code>catalogOf([a, b, c])</code> 顺手。
+  </li>
+  <li>
+    <b><code>fakeRules()</code> 造假依赖</b><br>
+    排序函数需要 <code>ruleStore</code>（里面有 <code>rulesFor</code> / <code>steamByPid</code> 等），但测试不想去下载真的规则库。所以造一个只有四个方法的假对象。<b>这叫 mock / stub</b>，因为 <code>sortLoadOrder</code> 只用到这几个方法，传个假的完全够用。
+  </li>
+</ol>
+
+<div class="tip">
+  <b>为什么这些能被测？</b>
+  <p>因为 <code>sortLoadOrder</code> 是<b>纯函数</b>：输入 keys + catalog + rules，输出 order，不读文件、不发请求、不改全局状态。纯函数最好测 —— 这也是为什么核心算法被单独放在一个文件里。</p>
+  <p>对比一下：<code>service.js</code> 里的东西就难测多了，因为它依赖磁盘、网络、全局 <code>state</code>。</p>
+</div>
+
+<h2>整个排序流程串起来</h2>
+
+<div class="flow">sortLoadOrder(activeKeys, catalog, ruleStore, { tieBreak })
+  │
+  ├─ ① keys = 去重 + 转小写
+  ├─ ② buildGraph(keys, catalog, ruleStore)
+  │     ├─ 遍历每个 mod，把 6 类规则转成边
+  │     ├─ addEdge 去重，保留最高优先级的来源
+  │     ├─ 官方 DLC 强制排成 Ludeon 官方顺序
+  │     ├─ tier 划分：Core/DLC=0, loadTop=1, 普通=2, loadBottom=3
+  │     └─ 迭代提拔：必须在 tier0 之前的 → tier0（直到不动点）
+  │
+  ├─ ③ current = tieBreakOrder(keys, catalog, tieBreak)
+  │     └─ 'name' → 按名字排（决定平局顺序）
+  │        'current' → 保持原样
+  │
+  ├─ ④ 按 tier 分四组
+  │
+  ├─ ⑤ 每组跑 topo()  ← Kahn 算法
+  │     ├─ 算入度，找入度为 0 的
+  │     ├─ 逐个输出，边的目标入度 -1
+  │     ├─ 遇到卡住（有环）→ findCycle() → 删最弱的边 → 重跑
+  │     └─ 返回 { order, broken }
+  │
+  ├─ ⑥ 四组结果拼起来
+  ├─ ⑦ 检查跨 tier 违规（报告，不强制修）
+  └─ ⑧ 算 moved（移动了几个）
+     return { order, moved, broken, crossTierViolations }</div>
+
+<h2>顺便看重试/兜底的设计</h2>
+
+<p>这个文件里有好几处"宁可结果不完美，也要返回结果"的地方。这种思路值得注意：</p>
+
+<table>
+  <thead><tr><th>地方</th><th>兜底策略</th></tr></thead>
+  <tbody>
+    <tr><td>有环</td><td>删最弱边继续，<b>不报错</b>，记进 <code>broken</code></td></tr>
+    <tr><td>200 次还解不开环</td><td>剩下的按原顺序追加，<b>不丢 mod</b></td></tr>
+    <tr><td>跨 tier 违规</td><td><b>只报告不修</b>（因为 tier 是硬意图，修了更糟）</td></tr>
+    <tr><td>RimSort 模式遇环</td><td>退回默认算法，标记 <code>rimsortCycle</code></td></tr>
+    <tr><td>找不到 mod 的规则</td><td>用空规则对象，<code>tiers.set(key, 3)</code> 放最后</td></tr>
+  </tbody>
+</table>
+
+<div class="note">
+  <b>这一页的收获</b>
+  <p>你看到了一个完整的"把现实世界的模糊需求变成确定算法"的过程：定义边的方向和优先级 → 分层固定硬意图 → 拓扑排序 → 破环兜底 → 平局裁决保证幂等。</p>
+  <p><b>真正的技术含量不在于会不会写拓扑排序，而在于这套优先级设计。</b>哪条规则该压过哪条，冲突时牺牲什么 —— 这才是这个项目 387 行代码背后的思考。</p>
+</div>
+
+<div class="pager">
+  <a href="03-scan.html"><span>上一页</span>← 3 · 扫描 mod</a>
+  <a href="05-rules.html" class="nx"><span>下一页</span>5 · 规则库与列表 →</a>
+</div>
+
+</main>
+</body>
+</html>

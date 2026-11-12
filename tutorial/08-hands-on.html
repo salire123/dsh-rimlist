@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>8 · 动手改与测试 · RimList 代码导读</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="side">
+  <div class="brand">
+    <b>RimList 代码导读</b>
+    <span>写给会一点 Python 的人</span>
+  </div>
+  <a href="index.html">0 · 先看这里</a>
+  <a href="01-js.html">1 · JS 速通</a>
+  <a href="02-entry.html">2 · 入口 index.js</a>
+  <a href="03-scan.html">3 · 扫描 mod</a>
+  <a href="04-sort.html">4 · 排序与诊断</a>
+  <a href="05-rules.html">5 · 规则库与列表</a>
+  <a href="06-service.html">6 · service.js</a>
+  <a href="07-client.html">7 · 前端 React</a>
+  <a href="08-hands-on.html" class="on">8 · 动手改与测试</a>
+  <div class="side-foot">
+    这一页的示例都真跑过。输出是真实结果，不是编的。
+  </div>
+</nav>
+
+<main>
+
+<div class="kicker">第 8 页 · 动手</div>
+
+<h1>
+  跑起来，然后改点什么
+  <span class="sub">读懂代码不等于会改代码。这一页给你可运行的实验环境、测试方法，和三个难度递增的改动练习。</span>
+</h1>
+
+<h2>先跑通测试</h2>
+
+<p>这个项目用 Node 内置的测试框架，没有 Jest / Vitest 那些东西。</p>
+
+<div class="filename">package.json:21-26</div>
+<pre><code>"scripts": {
+  "build": "node build.mjs",
+  "build:dev": "node build.mjs --no-minify",
+  "test": "node --test \"test/**/*.test.js\"",
+  "scan": "node scripts/scan.mjs"
+}</code></pre>
+
+<pre><code>cd rimlist
+pnpm install          <span class="c"># 或 npm install</span>
+pnpm test</code></pre>
+
+<p>应该看到 9 个测试文件全部通过（共 33 个用例）。</p>
+
+<div class="warn">
+  <b>如果 <code>pnpm test</code> 报 <code>spawn EPERM</code></b>
+  <p>说明你的环境不允许 <code>node --test</code> 启动子进程（某些沙箱或受限环境会这样）。这时可以逐个文件直接跑：</p>
+  <pre><code>node test/sorter.test.js
+node test/xml.test.js</code></pre>
+  <p>因为每个测试文件本身就是一个可执行模块。<code>process.test.js</code> 会跳过（它需要 Linux 上的 <code>/bin/sleep</code>）。</p>
+</div>
+
+<div class="filename">实际测试结果（本机运行）</div>
+<pre><code>classify.test.js     pass 5   fail 0
+gamelog.test.js      pass 3   fail 0
+launch.test.js       pass 3   fail 0
+modversions.test.js  pass 4   fail 0
+origin.test.js       pass 3   fail 0
+process.test.js      pass 0   fail 0   <span class="c">← 非 Linux，整文件跳过</span>
+sorter.test.js       pass 9   fail 0
+stores.test.js       pass 2   fail 0
+xml.test.js          pass 4   fail 0</code></pre>
+
+<h2>实验一：亲眼看排序算法</h2>
+
+<p>我在这份导读里放了一个可以直接跑的小脚本，它<b>不读你的真实 RimWorld 安装</b>，只用硬编码的假数据，所以绝对安全。</p>
+
+<div class="filename">tutorial/example-sort.mjs（片段）</div>
+<pre><code>const catalog = new Map(
+  [
+    mod('ludeon.rimworld', { name: 'Core' }),
+    mod('brrainz.harmony', { name: 'Harmony', loadBefore: ['ludeon.rimworld'] }),
+    mod('vanilla.expanded.core', { name: 'Vanilla Expanded Framework', modDependencies: [{ packageId: 'brrainz.harmony', displayName: 'Harmony' }] }),
+    mod('ratkin.race', { name: 'Ratkin Race', modDependencies: [{ packageId: 'vanilla.expanded.core', displayName: 'VEF' }] }),
+    mod('ratkin.gene.patch', { name: 'Ratkin Gene Patch', loadAfter: ['ratkin.race'] }),
+    mod('rocketman', { name: 'RocketMan' }),
+    mod('some.qol', { name: 'Some QoL Tweaks' }),
+  ].map((m) =&gt; [m.key, m]),
+)</code></pre>
+
+<p>运行：</p>
+
+<pre><code>node tutorial/example-sort.mjs</code></pre>
+
+<div class="filename">真实输出</div>
+<pre><code>当前顺序（乱）:
+  1. Some QoL Tweaks
+  2. Ratkin Gene Patch
+  3. Vanilla Expanded Framework
+  4. Core
+  5. RocketMan
+  6. Harmony
+  7. Ratkin Race
+
+排序前诊断: 0 errors, 3 warnings, 0 info
+  warning [order-about] Ratkin Gene Patch: About.xml says load after "Ratkin Race"
+  warning [order-dependency] Vanilla Expanded Framework: Should load after its dependency "Harmony"
+  warning [order-about] Harmony: About.xml says load before "Core"
+
+排序后（移动了 7 个，破环 0 个）:
+  1. Harmony
+  2. Core
+  3. Some QoL Tweaks
+  4. Vanilla Expanded Framework
+  5. Ratkin Race
+  6. Ratkin Gene Patch
+  7. RocketMan
+
+排序后诊断: 0 errors, 0 warnings, 0 info
+
+再排一次，移动 0 个 → 幂等性: 通过 ✓</code></pre>
+
+<h3>对照第 4 页的理论，逐条验证</h3>
+
+<table>
+  <thead><tr><th>观察</th><th>对应哪条规则</th></tr></thead>
+  <tbody>
+    <tr><td>Harmony 排第一（不是 Core）</td><td><code>loadBefore: ['ludeon.rimworld']</code> → 被提拔进 tier 0，且在 Core 前</td></tr>
+    <tr><td>Core 第二</td><td><code>tierOf</code> 返回 0（Core 本体）</td></tr>
+    <tr><td><b>Some QoL Tweaks 排第三</b>（明明没有任何规则约束它）</td><td><b>tie-break 按名字</b>。tier 2 里它和 VEF / Ratkin 并列，但它必须先满足 VEF 的依赖，所以等 Harmony 就绪后就和 VEF 一起进 ready，名字 "Some QoL Tweaks" &lt; "Vanilla Expanded Framework" → 排前面</td></tr>
+    <tr><td>VEF 在 Ratkin Race 前</td><td><code>modDependencies</code> → 边 <code>vef → ratkin.race</code></td></tr>
+    <tr><td>Ratkin Gene Patch 在 Ratkin Race 后</td><td><code>loadAfter: ['ratkin.race']</code> → 边 <code>ratkin.race → patch</code></td></tr>
+    <tr><td><b>RocketMan 最后</b></td><td>社区规则 <code>loadBottom</code> → tier 3，永远在最后</td></tr>
+    <tr><td>诊断 3 warnings → 0</td><td>三条都是"顺序错了"，排完自然消失</td></tr>
+    <tr><td>再排一次移动 0 个</td><td>幂等性 —— 排序算法必须有的性质</td></tr>
+  </tbody>
+</table>
+
+<div class="tip">
+  <b>现在改一下这个脚本，观察变化</b>
+  <p>试这几个实验，每个都会让你更懂第 4 页：</p>
+  <ol style="margin-bottom:0">
+    <li>把 <code>rocketman</code> 的社区规则改成 <code>loadTop</code> → 它应该跑到 Harmony 附近（tier 1，但被依赖关系推着走）</li>
+    <li>给 <code>some.qol</code> 加 <code>loadAfter: ['ratkin.gene.patch']</code> → 它应该排到最后</li>
+    <li>让 <code>ratkin.race</code> 加 <code>loadBefore: ['vanilla.expanded.core']</code>（与它的依赖矛盾）→ 观察 <code>r.broken</code> 里的破环报告</li>
+    <li>把 <code>sortLoadOrder(current, catalog, rules)</code> 改成 <code>sortLoadOrder(current, catalog, rules, { tieBreak: 'current' })</code> → 看"Some QoL Tweaks"的位置变化</li>
+  </ol>
+</div>
+
+<h2>实验二：验证你对 <code>pid</code> 的理解</h2>
+
+<p>自己造一个小脚本，测试第 3 页讲的大小写规则：</p>
+
+<pre><code>import { buildModsConfig, parseModsConfig, pid } from '../src/host/xml.js'
+
+console.log(pid('  Ludeon.RimWorld '))   <span class="c">// 'ludeon.rimworld'</span>
+
+const xml = buildModsConfig({
+  version: '1.6.4871',
+  activeMods: ['Ludeon.RimWorld', 'brrainz.Harmony', 'ludeon.rimworld'],
+  knownExpansions: ['Ludeon.RimWorld.Royalty'],
+})
+console.log(xml)</code></pre>
+
+<p>你会看到写入的 id <b>全小写且去重</b>（<code>Ludeon.RimWorld</code> 和 <code>ludeon.rimworld</code> 只留一个）。这正是 <code>test/xml.test.js</code> 最后一个测试在断言的事：</p>
+
+<div class="filename">test/xml.test.js:44-48</div>
+<pre><code>test('buildModsConfig writes lowercase, de-duplicated ids (RimWorld is case-sensitive here)', () =&gt; {
+  const xml = buildModsConfig({ version: 'v', activeMods: ['Ludeon.RimWorld', 'brrainz.Harmony', 'ludeon.rimworld'], knownExpansions: ['Ludeon.RimWorld.Royalty'] })
+  assert.ok(!/[A-Z]/.test(xml.replace(/&lt;\/?[A-Za-z]+&gt;|&lt;\?xml[^&gt;]*&gt;/g, '')))
+  assert.deepEqual(parseModsConfig(xml).activeMods, ['ludeon.rimworld', 'brrainz.harmony'])
+})</code></pre>
+
+<p>那个正则 <code>/[A-Z]/</code> 配合 <code>.replace()</code> 先把所有 XML 标签删掉（标签名当然有大小写），剩下的纯内容里<b>不能出现任何大写字母</b>。这是个很聪明的断言写法。</p>
+
+<h2>练习一（简单）：加一条测试</h2>
+
+<p>目标：证明你理解了诊断。<b>在 <code>test/sorter.test.js</code> 末尾加一个测试</b>，验证"缺依赖"能被报告出来。</p>
+
+<details>
+  <summary>参考解法（先自己写，再点开）</summary>
+  <pre><code>test('diagnose reports a missing dependency as an error', () =&gt; {
+  const cat = catalogOf(
+    mod('ludeon.rimworld'),
+    mod('needs.harmony', { modDependencies: [{ packageId: 'brrainz.harmony', displayName: 'Harmony' }] }),
+  )
+  <span class="c">// Harmony 不在 catalog 里，也没启用 → 应该是 dependency-missing</span>
+  const d = diagnose(['ludeon.rimworld', 'needs.harmony'], cat, fakeRules(), { gameMajor: '1.6' })
+  const issue = d.issues.find((i) =&gt; i.code === 'dependency-missing')
+  assert.ok(issue, 'should report a missing dependency')
+  assert.equal(issue.level, 'error')
+  assert.equal(issue.mod, 'needs.harmony')
+  assert.equal(issue.target, 'brrainz.harmony')
+  assert.equal(issue.fix, 'subscribe')   <span class="c">// 没装 → 提示去订阅</span>
+})</code></pre>
+  <p>再写一个变体：把 Harmony 加进 catalog 但不启用 → <code>code</code> 应该是 <code>dependency-inactive</code>，<code>fix</code> 是 <code>'activate'</code>。这是第 4 页那个三元表达式的验证。</p>
+</details>
+
+<h2>练习二（中等）：修掉那个效率问题</h2>
+
+<p>第 6 页指出 <code>classifyOne</code> 有个重复工作的问题：<code>inspectModFolder</code> 被调了两次，<code>dependents</code> 算了三遍。</p>
+
+<div class="filename">src/host/service.js:245-258（现状）</div>
+<pre><code>const version = versionOf(m)
+const saved = !force ? await modTags.getAuto(key, version) : null
+const result = saved?.result || classifyMod(m, await inspectModFolder(m.path, state.game?.major), {
+  dependents: state.mods.reduce((n, x) =&gt; n + (x.modDependencies || []).filter((d) =&gt; pid(d.packageId) === key).length, 0),
+})
+if (!saved) {
+  const f = await inspectModFolder(m.path, state.game?.major)
+  const automatic = classifyMod(m, f, { dependents: ...同一串 reduce 又写一遍... })
+  await modTags.setAuto(key, version, automatic, signalsSummary(f))
+  m.tags = automatic
+} else m.tags = saved.result</code></pre>
+
+<details>
+  <summary>参考改法</summary>
+  <p>核心思路：<b>把"代价高的计算"提到外面，只做一次。</b></p>
+  <pre><code>const version = versionOf(m)
+const saved = !force ? await modTags.getAuto(key, version) : null
+if (saved) {
+  m.tags = saved.result
+} else {
+  <span class="c">// 只读一次文件夹，只算一次被依赖数</span>
+  const facts = await inspectModFolder(m.path, state.game?.major)
+  const dependents = state.mods.reduce(
+    (n, x) =&gt; n + (x.modDependencies || []).filter((d) =&gt; pid(d.packageId) === key).length,
+    0,
+  )
+  const automatic = classifyMod(m, facts, { dependents })
+  await modTags.setAuto(key, version, automatic, signalsSummary(facts))
+  m.tags = automatic
+}
+const override = await modTags.getAi(key)
+if (override) m.tags = override
+return m.tags</code></pre>
+  <p>改动点：</p>
+  <ul>
+    <li>提前分支：<code>saved</code> 有就直接用，不再碰磁盘</li>
+    <li><code>inspectModFolder</code> 只调一次（原来两次）</li>
+    <li><code>dependents</code> 只算一次（原来三次）</li>
+    <li>删掉了那个算完就丢的 <code>result</code> 变量</li>
+  </ul>
+  <p><b>大文件、几百个 mod 时，这会省掉一半的磁盘 IO</b> —— <code>inspectModFolder</code> 要遍历整个 mod 文件夹数 Defs、patch、DLL、贴图。</p>
+</details>
+
+<div class="tip">
+  <b>改完之后怎么验证</b>
+  <p>分类是有测试的：<code>node test/classify.test.js</code>。但那测的是 <code>classifyMod</code>（纯函数），不是 <code>classifyOne</code>（有 IO）。</p>
+  <p>所以更实际的验证是：启动插件，在界面上打开某个 mod 的详情，确认标签还在、内容没变。<b>改"有副作用"的代码时，纯函数测试保不了你，得实际跑一遍。</b></p>
+</div>
+
+<h2>练习三（稍难）：加一个新的诊断项</h2>
+
+<p>假设你想加一条检查：<b>"这个 mod 装了但是没启用，而且它有 5 个以上其他 mod 依赖它"</b> —— 这通常意味着你漏开了一个重要的前置库。</p>
+
+<p>这需要动三个地方，正好把整个项目走一遍：</p>
+
+<ol class="steps">
+  <li>
+    <b><code>src/host/sorter.js</code> 的 <code>diagnose</code></b><br>
+    加一段检查。需要知道"有多少已启用的 mod 依赖它" —— 但 <code>diagnose</code> 只收到 <code>activeKeys</code>，而未启用的 mod 不在里面。
+  </li>
+  <li>
+    <b><code>src/host/service.js</code> 的 <code>diagnose</code> method</b><br>
+    把 <code>state.mods</code>（全部 mod，不只是启用的）也传进去。<b>这是关键的设计决策</b> —— 见下面的讨论。
+  </li>
+  <li>
+    <b><code>src/host/i18n</code> 不需要改</b>，但界面上如果要显示这个新 code，得在 <code>panels.jsx</code> 里加映射。
+  </li>
+</ol>
+
+<div class="note">
+  <b>这里有个真实的设计问题</b>
+  <p><code>diagnose(activeKeys, catalog, ruleStore, opts)</code> 的签名决定了它<b>只能看到已启用的 mod</b>（因为 <code>activeKeys</code> 就是启用列表）。要做"未启用但有依赖"的检查，你得：</p>
+  <ul>
+    <li><b>方案 A</b>：给 <code>opts</code> 加一个 <code>allMods</code> 字段。改动最小，但让 <code>diagnose</code> 的职责变宽了。</li>
+    <li><b>方案 B</b>：在 service 层单独算这个检查，追加到 <code>issues</code> 里。职责清晰，但诊断逻辑散在两处。</li>
+  </ul>
+  <p>项目现有的选择是 A 风格的（<code>duplicates</code> 就是通过 <code>opts</code> 传进去的）。<b>照现有风格做</b>通常是对的 —— 保持一致性比"我认为更好"重要。</p>
+</div>
+
+<h2>真实修改的完整流程</h2>
+
+<div class="filename">改任何功能的检查清单</div>
+<div class="flow">① 定位
+   grep / Ctrl+Shift+O 找到相关代码
+        ↓
+② 读懂
+   顺着调用链往上往下各看两层
+        ↓
+③ 写测试（先写！）
+   在 test/ 里加一个失败用例
+        ↓
+④ 改代码
+   尽量小步改，一次一个概念
+        ↓
+⑤ 跑测试
+   node test/xxx.test.js
+        ↓
+⑥ 改前端（如果需要）
+   src/client/*.jsx + i18n.js 加文案
+        ↓
+⑦ 重新构建
+   node build.mjs
+        ↓
+⑧ 实际验证
+   刷新 DSH 页面，点一遍相关功能
+        ↓
+⑨ 看有没有别的调用点受影响
+   grep 那个函数名，检查所有 caller</div>
+
+<h3>第 ⑨ 步容易被忽略</h3>
+
+<p>举个例子：如果你改了 <code>pid()</code> 的行为（比如让它保留某些字符），<b>影响范围是整份代码库</b>：</p>
+
+<pre><code>grep -rn "pid(" src/ | wc -l</code></pre>
+
+<p>这个项目里 <code>pid</code> 出现了几十次。<b>改这种基础函数前，先数一下调用点。</b></p>
+
+<h2>常用命令速查</h2>
+
+<table>
+  <thead><tr><th>命令</th><th>作用</th></tr></thead>
+  <tbody>
+    <tr><td><code>node test/sorter.test.js</code></td><td>跑单个测试文件</td></tr>
+    <tr><td><code>pnpm test</code></td><td>跑全部（需要能 spawn 子进程）</td></tr>
+    <tr><td><code>node scripts/scan.mjs</code></td><td>扫描你真实的 RimWorld，打印摘要</td></tr>
+    <tr><td><code>node scripts/check-sort.mjs</code></td><td>用真实 mod 列表跑诊断 + 排序 + 幂等性检查</td></tr>
+    <tr><td><code>node tutorial/example-sort.mjs</code></td><td>用假数据跑排序（安全，不动你的安装）</td></tr>
+    <tr><td><code>node build.mjs</code></td><td>构建前端 → <code>lib/client.js</code></td></tr>
+    <tr><td><code>node build.mjs --no-minify</code></td><td>构建但不压缩（方便调试前端）</td></tr>
+    <tr><td><code>grep -rn "关键词" src/</code></td><td>搜代码</td></tr>
+    <tr><td><code>grep -n "^    [a-z]*: async" src/host/service.js</code></td><td>列出所有 method 和行号</td></tr>
+  </tbody>
+</table>
+
+<div class="warn">
+  <b><code>scripts/check-sort.mjs</code> 会读你的真实配置，但不会写</b>
+  <p>它会读 <code>ModsConfig.xml</code>、扫描所有 mod、下载规则库到 <code>.tmp-data/</code>，然后<b>只打印结果</b>。不会改你的游戏配置。可以放心跑。</p>
+  <p>但它需要网络（下载规则库）和真实的 RimWorld 安装。如果只是想学算法，用 <code>tutorial/example-sort.mjs</code>。</p>
+</div>
+
+<h2>这个项目的代码风格总结</h2>
+
+<p>如果你要往这里加功能，跟着现有风格写就不会突兀。观察到的规律：</p>
+
+<div class="grid2">
+  <div class="card">
+    <h4>函数式 + 不可变</h4>
+    <p>不用 class。数据更新一律 <code>{...old, key: val}</code>。数组操作用 <code>map/filter</code> 而不是 <code>for</code> + <code>push</code>（虽然也有）。</p>
+  </div>
+  <div class="card">
+    <h4>小函数 + 描述性名字</h4>
+    <p><code>existedBefore</code> / <code>needsUpdate</code> / <code>wrapResult</code>。<b>名字长但一看就懂</b>，比 <code>x</code> / <code>tmp</code> 好得多。</p>
+  </div>
+  <div class="card">
+    <h4>绝不返回 undefined</h4>
+    <p><code>parseAbout</code> 每个字段都有默认值；<code>run()</code> 永远返回 <code>{ ok, ... }</code>。<b>下游不用判空。</b></p>
+  </div>
+  <div class="card">
+    <h4>错误不抛，变成数据</h4>
+    <p>工具层用 <code>{ ok: false, error }</code>。前端用 toast。<b>只有真正"没法继续"时才 throw</b>（比如参数缺失）。</p>
+  </div>
+  <div class="card">
+    <h4>注释解释"为什么"</h4>
+    <p>看 <code>writeConfig</code> 里那段关于大小写的注释 —— 记录了踩过的坑。<b>这种注释比"这行做什么"有价值一百倍。</b></p>
+  </div>
+  <div class="card">
+    <h4>兜底优先于报错</h4>
+    <p>破环、删最弱边、RimSort 退回默认算法、<code>catch {}</code> 静默忽略。<b>宁可降级也不要崩。</b></p>
+  </div>
+</div>
+
+<h2>三个仍然需要小心的地方</h2>
+
+<table>
+  <thead><tr><th>地方</th><th>风险</th></tr></thead>
+  <tbody>
+    <tr><td><code>pid()</code> 无处不在</td><td>改它影响全库。而且很多地方靠它当 Map key，漏一处就是静默失效（规则不生效但看不出来）。</td></tr>
+    <tr><td><code>state</code> 是全局可变的</td><td>任何函数都能改 <code>state.config</code>。并发安全只靠 <code>serialize()</code>，<b>新写的写操作记得包进去</b>。</td></tr>
+    <tr><td><code>slimSteam</code> / <code>indexSteam</code> 必须配对</td><td>单字母键名。加字段时两边都要改，漏一边就是查不到的字段。</td></tr>
+  </tbody>
+</table>
+
+<h2>再往后</h2>
+
+<p>读完了这份导读，你已经能独立改这个项目的大部分地方。如果想再深入：</p>
+
+<ol>
+  <li>
+    <b>读 RimSort 的 Python 源码</b><br>
+    <code>sorter.js</code> 里的 <code>sortRimSort</code> 是照着 <code>app/sort/topo_sort.py</code> 翻译的。对照着读，能学到"同一个算法在两种语言里怎么写"，顺便练 Python 那边的品味。
+  </li>
+  <li>
+    <b>读 DSH 的插件 API</b><br>
+    <code>apply(ctx)</code>、<code>ctx.get('webServer')</code>、<code>ctx.tools.register()</code>、<code>ctx.inject()</code> —— 这些是宿主提供的。想写自己的插件就得看宿主的文档。
+  </li>
+  <li>
+    <b>给这个项目提 PR</b><br>
+    第 6 页那个 <code>classifyOne</code> 的重复计算就是现成的改进点。或者 <code>diagnose</code> 的测试覆盖率可以更高。
+  </li>
+</ol>
+
+<div class="note">
+  <b>最后一句</b>
+  <p>这个项目最大的价值不在算法（拓扑排序是教科书内容），而在<b>它把一堆混乱的现实约束——作者随意的声明、社区众包的经验、用户的偏好、游戏的隐藏行为——整理成了一套有优先级的规则</b>。</p>
+  <p>读代码读到这一层，就不只是"看懂语法"了。</p>
+</div>
+
+<h2>回看：整个项目的地图</h2>
+
+<div class="flow">┌─────────────────────────────────────────────────────────┐
+│  浏览器（src/client）                                    │
+│  entry.jsx → app.jsx → columns.jsx / panels.jsx          │
+│  store.js（全部状态）  api.js（一个 fetch）               │
+└───────────────────────┬─────────────────────────────────┘
+                        │ POST /api/rimlist { method, args }
+┌───────────────────────▼─────────────────────────────────┐
+│  index.js  httpHandler → service.dispatch               │
+├─────────────────────────────────────────────────────────┤
+│  service.js  ← 总调度（state / serialize / methods）     │
+│    ├─ scan.js    + xml.js    → catalog（有那些 mod）     │
+│    ├─ rules.js   + lists.js  → 规则和命名列表            │
+│    ├─ sorter.js              → 排序 + 诊断  ★核心        │
+│    ├─ classify.js            → 猜 mod 类型               │
+│    ├─ paths.js / launch.js / process.js / gamelog.js     │
+│    └─ modversions.js / archive.js / logger            │
+├─────────────────────────────────────────────────────────┤
+│  ~/.dsh/rimlist/   settings · userRules · db/ · lists/  │
+│                    backups/ · modBackups/               │
+└─────────────────────────────────────────────────────────┘
+                        │
+                        ▼ 写 ModsConfig.xml（先备份）
+              RimWorld 读取它 → 加载 mod
+
+★ 真正值得反复读的三个文件：
+   src/host/sorter.js    排序与诊断的全部逻辑（387 行）
+   src/host/service.js   串行化队列 + dispatch（关键段落 < 150 行）
+   src/client/store.js   前端状态设计（108 行）</div>
+
+<div class="pager">
+  <a href="07-client.html"><span>上一页</span>← 7 · 前端 React</a>
+  <a href="index.html" class="nx"><span>回到开头</span>0 · 先看这里 →</a>
+</div>
+
+</main>
+</body>
+</html>

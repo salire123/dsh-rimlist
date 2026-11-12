@@ -1,0 +1,750 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>1 · 给 Python 程序员的 JS 速通 · RimList 代码导读</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="side">
+  <div class="brand">
+    <b>RimList 代码导读</b>
+    <span>写给会一点 Python 的人</span>
+  </div>
+  <a href="index.html">0 · 先看这里</a>
+  <a href="01-js.html" class="on">1 · JS 速通</a>
+  <a href="02-entry.html">2 · 入口 index.js</a>
+  <a href="03-scan.html">3 · 扫描 mod</a>
+  <a href="04-sort.html">4 · 排序与诊断</a>
+  <a href="05-rules.html">5 · 规则库与列表</a>
+  <a href="06-service.html">6 · service.js</a>
+  <a href="07-client.html">7 · 前端 React</a>
+  <a href="08-hands-on.html">8 · 动手改与测试</a>
+  <div class="side-foot">
+    这一页的每个例子都来自仓库里的真实代码，不是编的教学示例。
+  </div>
+</nav>
+
+<main>
+
+<div class="kicker">第 1 页 · 语法桥</div>
+
+<h1>
+  JS 速通
+  <span class="sub">只讲你在 rimlist 里真的会遇到的写法。每一项都配 Python 对照和仓库里的出处。</span>
+</h1>
+
+<div class="tip">
+  <b>怎么用这一页</b>
+  <p>别看一遍就想记住。建议：先读一遍感受一下，然后直接去看第 2–6 页，遇到看不懂的语法再回来查。<b>每一个小标题都可以当字典条目用。</b></p>
+</div>
+
+<h2>0. 三个先建立的心理准备</h2>
+
+<div class="grid2">
+  <div class="card">
+    <h4>1. 一切皆"值"，函数也是值</h4>
+    <p>Python 里函数是一等公民 —— JS 里更是。函数可以被赋值给变量、当参数传、当返回值返回。这个项目里到处都是这种写法。</p>
+  </div>
+  <div class="card">
+    <h4>2. 异步是显式的</h4>
+    <p>读文件、发请求都返回 Promise。不加 <code>await</code> 你就拿到一个"还没好的东西"。Python 也是这套，但要更小心 —— 忘了 <code>await</code> 不会报错，只会静默出错。</p>
+  </div>
+  <div class="card">
+    <h4>3. 没有类型，但有 <code>undefined</code></h4>
+    <p>Python 的 <code>None</code> 在 JS 里有两个亲戚：<code>null</code> 和 <code>undefined</code>。代码里大量用 <code>?.</code> 和 <code>??</code> 来对付它们。</p>
+  </div>
+</div>
+
+<h2>1. 变量声明：<code>const</code> 和 <code>let</code></h2>
+
+<p>Python 直接 <code>x = 1</code>。JS 要声明，而且声明方式有含义：</p>
+
+<table>
+  <thead><tr><th>JS</th><th>含义</th><th>Python 类比</th></tr></thead>
+  <tbody>
+    <tr><td><code>const x = 1</code></td><td>不能再指向别的值（但对象内容能改）</td><td>没有完全对应的，约等于"约定不重新赋值"</td></tr>
+    <tr><td><code>let x = 1</code></td><td>可以重新赋值</td><td><code>x = 1</code></td></tr>
+    <tr><td><code>var</code></td><td>老写法，本项目不用</td><td>—</td></tr>
+  </tbody>
+</table>
+
+<div class="warn">
+  <b>关键区别：const ≠ 不可变</b>
+  <p><code>const</code> 只锁住"这个变量名指向谁"，不锁对象内部。<code>const a = []</code> 之后 <code>a.push(1)</code> 完全合法。这个项目里到处都是 <code>const state = {...}</code>，然后拼命改 <code>state.xxx</code>。</p>
+</div>
+
+<div class="filename">src/host/service.js:60</div>
+<pre><code>const state = {
+  settings: { ...DEFAULT_SETTINGS },
+  discovered: null,
+  game: null,
+  catalog: new Map(),
+  mods: [],
+  duplicates: [],
+  scannedAt: null,
+  config: null,
+  configMtime: 0,
+  ready: null,
+}</code></pre>
+
+<p>后面代码会写 <code>state.mods = r.mods</code> —— 合法，因为改的是对象的属性，不是 <code>state</code> 这个变量本身。</p>
+
+<h2>2. 箭头函数 —— 本项目 90% 的函数都是这种</h2>
+
+<p>Python 的 <code>lambda</code> 只能写一个表达式，JS 的箭头函数可以写完整的函数体。<b>这是你最先要适应的东西。</b></p>
+
+<div class="grid2">
+  <div class="card">
+    <h4>单表达式（像 lambda）</h4>
+    <pre style="margin:6px 0"><code>const double = (x) =&gt; x * 2</code></pre>
+    <p style="font-size:13.5px">Python: <code>double = lambda x: x * 2</code></p>
+  </div>
+  <div class="card">
+    <h4>带函数体（像 def）</h4>
+    <pre style="margin:6px 0"><code>const f = (a, b) =&gt; {
+  const s = a + b
+  return s
+}</code></pre>
+    <p style="font-size:13.5px">Python: <code>def f(a, b): ...</code></p>
+  </div>
+</div>
+
+<p>看真实代码：</p>
+
+<div class="filename">src/host/xml.js:8</div>
+<pre><code>export const pid = (s) =&gt; String(s || '').trim().toLowerCase()</code></pre>
+
+<details>
+  <summary>逐段拆解这一行（点开）</summary>
+  <p>这是一个"单表达式箭头函数"，等价于：</p>
+  <pre><code>export function pid(s) {
+  return String(s || '').trim().toLowerCase()
+}</code></pre>
+  <p>再逐步看：</p>
+  <ul>
+    <li><code>s || ''</code> → 如果 <code>s</code> 是 <code>undefined</code> / <code>null</code> / <code>''</code> / <code>0</code>，用 <code>''</code> 代替。（这是 JS 的"假值"机制，见第 6 节）</li>
+    <li><code>String(...)</code> → 转字符串，<code>str()</code> 一样</li>
+    <li><code>.trim()</code> → 去掉首尾空格</li>
+    <li><code>.toLowerCase()</code> → 转小写</li>
+  </ul>
+  <p>Python 版本：<code>def pid(s): return str(s or "").strip().lower()</code> —— 几乎逐字对应。</p>
+</details>
+
+<h3>只有一个参数时可以省括号</h3>
+
+<div class="filename">src/host/service.js:129（节选）</div>
+<pre><code>const activeKeys = () =&gt; (state.config?.activeMods || []).map(pid)</code></pre>
+
+<p><code>() =&gt;</code> 是零参数（像 Python 的 <code>lambda: ...</code>）。<code>.map(pid)</code> 是把 <code>pid</code> 这个函数直接传进去 —— 相当于 Python 的 <code>map(pid, ...)</code>，稍后第 8 节讲。</p>
+
+<h3>最容易踩的坑：函数体用 <code>{}</code> 就必须 <code>return</code></h3>
+
+<pre><code>// ✗ 错：返回 undefined！因为 {} 被当成了函数体
+const f = (x) =&gt; { x * 2 }
+
+// ✓ 对
+const f = (x) =&gt; { return x * 2 }
+const f = (x) =&gt; x * 2        <span class="c">// 没有 {} 才是隐式返回</span>
+
+// ✓ 想返回一个对象，必须加括号
+const f = (x) =&gt; ({ ok: x })   <span class="c">// 不加括号会被当成函数体</span></code></pre>
+
+<p>仓库里到处是这种"返回一个对象"的箭头函数：</p>
+
+<div class="filename">index.js:116</div>
+<pre><code>const textOut = (fn) =&gt; ({
+  schema: { type: 'object', additionalProperties: true },
+  render: (args, value) =&gt; [{ type: 'text', text: fn(value) }],
+})</code></pre>
+
+<p>这里 <code>textOut</code> 是个<b>高阶函数</b>：你给它一个"格式化函数" <code>fn</code>，它返回一个描述"工具输出格式"的对象。Python 里你会这么写：</p>
+
+<pre><code>def text_out(fn):
+    return {
+        "schema": {"type": "object"},
+        "render": lambda args, value: [{"type": "text", "text": fn(value)}],
+    }</code></pre>
+
+<h2>3. <code>?.</code> 和 <code>??</code> —— 你会看到几百次</h2>
+
+<p>这两个是 JS 的救命符，Python 里没有直接对应物。它们专门对付 <code>null</code> / <code>undefined</code>。</p>
+
+<table>
+  <thead><tr><th>写法</th><th>含义</th><th>Python 类比</th></tr></thead>
+  <tbody>
+    <tr><td><code>a?.b</code></td><td>如果 <code>a</code> 是 null/undefined，整个表达式就是 <code>undefined</code>（不报错）；否则取 <code>a.b</code></td><td>没有。<code>a.b if a else None</code> 但只在 <code>a</code> 为 None 时短路</td></tr>
+    <tr><td><code>a ?? b</code></td><td>如果 <code>a</code> 是 null/undefined，用 <code>b</code>；否则用 <code>a</code></td><td><code>a if a is not None else b</code></td></tr>
+    <tr><td><code>a \|\| b</code></td><td>如果 <code>a</code> 是"假值"（null、undefined、0、''、false、NaN），用 <code>b</code></td><td><code>a or b</code></td></tr>
+  </tbody>
+</table>
+
+<div class="warn">
+  <b><code>??</code> 和 <code>||</code> 的区别要记牢</b>
+  <p><code>0 || 5</code> 得到 <code>5</code>（因为 0 是假值）；<code>0 ?? 5</code> 得到 <code>0</code>（因为 0 不是 null）。<b>数字类型的默认值必须用 <code>??</code></b>，否则用户设的 0 会被吞掉。</p>
+  <p>看这个真实例子 —— 用户把 <code>waitMs</code> 设成 0 是有意义的（"立刻强杀"），所以这里必须用 <code>??</code>：</p>
+  <pre><code>args.waitMs != null ? { waitMs: args.waitMs } : {}</code></pre>
+</div>
+
+<p>真实代码里两个连用：</p>
+
+<div class="filename">src/host/sorter.js:309</div>
+<pre><code>const nameOf = (k) =&gt; catalog.get(k)?.name || ruleStore?.steamByPid(k)?.name || k</code></pre>
+
+<p>翻译成中文：</p>
+<ol>
+  <li>从 <code>catalog</code> 里找这个 key，找到了就取 <code>.name</code>，找不到（<code>catalog.get(k)</code> 返回 <code>undefined</code>）就整体是 <code>undefined</code></li>
+  <li>如果没有名字，试试从 steam 数据库里查</li>
+  <li>还是没有，就返回这个 key 本身（保证一定有值）</li>
+</ol>
+
+<p>Python 版本会很难看（需要 try/except 或层层 if），这就是 JS 的 <code>?.</code> 的价值：<b>一条链上任何一环缺失都不会崩</b>。</p>
+
+<h2>4. 解构赋值 —— 从对象/数组里"拆"出变量</h2>
+
+<p>Python 有 <code>a, b = b, a</code>。<b>JS 把它扩展到了对象</b>，而且用得像呼吸一样频繁。</p>
+
+<h3>数组解构</h3>
+<pre><code>const [a, b] = [1, 2]           <span class="c">// a=1, b=2   （≈ Python: a, b = 1, 2）</span>
+const [x, ...rest] = [1, 2, 3]  <span class="c">// x=1, rest=[2,3]  （≈ Python: x, *rest = ...）</span></code></pre>
+
+<p>真实用法：</p>
+
+<div class="filename">src/host/sorter.js:270</div>
+<pre><code>const keys = [...new Set(activeKeys.map(pid))]
+const { edges, tiers } = buildGraph(keys, catalog, ruleStore)</code></pre>
+
+<p>第二行是<b>对象解构</b>：<code>buildGraph</code> 返回 <code>{ edges, tiers }</code>，这里一次性拆成两个变量。Python 只能写：</p>
+
+<pre><code>g = build_graph(...)
+edges, tiers = g["edges"], g["tiers"]</code></pre>
+
+<h3>带默认值的解构 —— 这个项目超爱用</h3>
+
+<div class="filename">src/host/sorter.js:268</div>
+<pre><code>export function sortLoadOrder(activeKeys, catalog, ruleStore, { tieBreak = 'name' } = {}) {</code></pre>
+
+<p>这个签名要仔细看，它包含两个技巧：</p>
+
+<div class="kv">
+  <div><span class="k">第 4 个参数</span><span class="v">在签名里就解构成 <code>{ tieBreak }</code> —— 调用者传的是一个对象 <code>{ tieBreak: 'rimsort' }</code></span></div>
+  <div><span class="k"><code>tieBreak = 'name'</code></span><span class="v">对象里没有这个属性时用默认值 <code>'name'</code></span></div>
+  <div><span class="k"><code>= {}</code></span><span class="v">整个对象参数本身如果没传（<code>undefined</code>），用空对象兜底。少了这个，调用 <code>sortLoadOrder(a,b,c)</code> 会直接崩</span></div>
+</div>
+
+<p>Python 的等价写法要啰嗦得多：</p>
+
+<pre><code>def sort_load_order(active_keys, catalog, rule_store, opts=None):
+    opts = opts or {}
+    tie_break = opts.get("tieBreak", "name")</code></pre>
+
+<h2>5. 展开运算符 <code>...</code> —— 复制、合并、传参</h2>
+
+<p>一个符号三种用途，都很常见。</p>
+
+<h3>① 复制 / 合并对象（最常用来做"不可变更新"）</h3>
+
+<div class="filename">src/host/service.js:333</div>
+<pre><code>state.config = { ...state.config, activeMods: next }</code></pre>
+
+<p>意思是：造一个<b>新对象</b>，先塞进 <code>state.config</code> 的所有字段，再用 <code>activeMods: next</code> 覆盖其中一项。Python 版本：</p>
+
+<pre><code>state["config"] = {**state["config"], "activeMods": next}</code></pre>
+
+<div class="tip">
+  <b>为什么非要用新对象？</b>
+  <p>因为前端 React 判断"数据变没变"是靠<b>引用比较</b>（<code>old === new</code>）。原地改 <code>state.config.activeMods = next</code> 引用不变，React 就不知道要重画界面。所以整份代码里都用 <code>{...old, key: value}</code> 来更新。这就是"不可变数据"习惯。</p>
+</div>
+
+<h3>② 复制 / 合并数组</h3>
+
+<pre><code>const copy = [...arr]                    <span class="c">// 浅拷贝，≈ arr[:] 或 list(arr)</span>
+const merged = [...a, ...b]              <span class="c">// ≈ a + b</span>
+const uniq = [...new Set(arr)]           <span class="c">// 去重，≈ list(dict.fromkeys(arr))</span></code></pre>
+
+<p>第 4 页会看到这个：</p>
+
+<div class="filename">src/host/sorter.js:275</div>
+<pre><code>const edgeList = [...edges.values()]</code></pre>
+
+<p><code>edges</code> 是 <code>Map</code>，<code>.values()</code> 返回一个迭代器。用 <code>[...]</code> 把它"摊开"成数组 —— 完全等价于 Python 的 <code>list(edges.values())</code>。</p>
+
+<h3>③ 把数组当参数列表传进去</h3>
+
+<pre><code>console.log(...arr)              <span class="c">// ≈ print(*arr)</span>
+next.splice(position, 0, ...add) <span class="c">// 把 add 里的每个元素都插进去</span></code></pre>
+
+<h2>6. 真值 / 假值 —— Python 直觉基本能迁移</h2>
+
+<p>JS 里被视为"假"的值：<code>false</code>、<code>0</code>、<code>-0</code>、<code>0n</code>、<code>""</code>、<code>null</code>、<code>undefined</code>、<code>NaN</code>。<b>其他一切都是真</b>。</p>
+
+<div class="warn">
+  <b>两个 Python 程序员必踩的坑</b>
+  <table style="margin-top:8px">
+    <thead><tr><th>表达式</th><th>JS 结果</th><th>Python 结果</th></tr></thead>
+    <tbody>
+      <tr><td><code>[] ? 'a' : 'b'</code></td><td><code>'a'</code>（空数组是<b>真</b>！）</td><td><code>'b'</code>（空列表是假）</td></tr>
+      <tr><td><code>{} ? 'a' : 'b'</code></td><td><code>'a'</code>（空对象也是真）</td><td><code>'b'</code></td></tr>
+    </tbody>
+  </table>
+  <p>所以判断数组空不空必须写 <code>arr.length === 0</code>，判断对象空不空要用 <code>Object.keys(obj).length === 0</code>。</p>
+</div>
+
+<p>真实代码里就遵守了这个规则：</p>
+
+<div class="filename">index.js:147 附近（节选）</div>
+<pre><code>s.mods.filter((m) =&gt; m.source === 'workshop').length</code></pre>
+
+<p>而不是 <code>if (s.mods)</code>。</p>
+
+<h3>常用简写</h3>
+<pre><code>a || b          <span class="c">// a 假就用 b          ≈ a or b</span>
+a &amp;&amp; b          <span class="c">// a 假就用 a，否则 b   ≈ a and b</span>
+!a              <span class="c">// 取反                ≈ not a</span>
+!!a             <span class="c">// 转成真正的布尔值      ≈ bool(a)</span>
+a &gt; 0 ? x : y   <span class="c">// 三元                ≈ x if a &gt; 0 else y</span></code></pre>
+
+<p>三元表达式在 JSX 里用得极多（第 7 页）：</p>
+
+<div class="filename">src/client/app.jsx:202</div>
+<pre><code>&lt;button onClick={() =&gt; startGame(false)}&gt;▶ 启动&lt;/button&gt;</code></pre>
+
+<p>而 <code>&amp;&amp;</code> 常用来"条件渲染"，等价于 Python 的 <code>if</code> 保护：</p>
+
+<div class="filename">src/host/service.js:329（节选，改写排版）</div>
+<pre><code>lines.push(
+  v.cloned.length &amp;&amp; `Cloned from git (${v.cloned.length}): ...`
+)</code></pre>
+
+<p>当 <code>v.cloned.length</code> 是 0（假值）时，整个表达式是 <code>0</code>；后面 <code>.filter(Boolean)</code> 会把它滤掉。这是"只在有内容时才加这一行"的惯用法。</p>
+
+<h2>7. 相等：<code>===</code> 不是 <code>==</code></h2>
+
+<p>本项目<b>只用 <code>===</code> 和 <code>!==</code></b>，从不使用 <code>==</code>。照做就行。</p>
+
+<table>
+  <thead><tr><th>写法</th><th>行为</th></tr></thead>
+  <tbody>
+    <tr><td><code>===</code></td><td>严格相等：类型不同就不等。<code>1 === '1'</code> → <code>false</code></td></tr>
+    <tr><td><code>==</code></td><td>会做类型转换，坑很多。<code>1 == '1'</code> → <code>true</code>。<b>别用。</b></td></tr>
+  </tbody>
+</table>
+
+<div class="note">
+  <b>但对象和数组永远不"相等"</b>
+  <p><code>[1,2] === [1,2]</code> 是 <code>false</code>！因为比的是<b>引用</b>（是不是同一块内存），不是内容。想比内容要手动比较，或者像这个项目一样：</p>
+  <pre><code>const dirty = draft !== null &amp;&amp; JSON.stringify(draft) !== JSON.stringify(snap?.active || [])</code></pre>
+  <p>（<code>src/client/store.js:40</code>）用 JSON 字符串来比数组内容。简单粗暴但有效。</p>
+</div>
+
+<h2>8. 数组三板斧：<code>map</code> / <code>filter</code> / <code>find</code></h2>
+
+<p>这三个人你会用到吐。关键点：<b>它们都不修改原数组，而是返回新数组</b>。</p>
+
+<table>
+  <thead><tr><th>JS</th><th>Python</th><th>作用</th></tr></thead>
+  <tbody>
+    <tr><td><code>arr.map(f)</code></td><td><code>[f(x) for x in arr]</code></td><td>转换每一个</td></tr>
+    <tr><td><code>arr.filter(f)</code></td><td><code>[x for x in arr if f(x)]</code></td><td>筛选</td></tr>
+    <tr><td><code>arr.find(f)</code></td><td><code>next((x for x in arr if f(x)), None)</code></td><td>找第一个，找不到返回 <code>undefined</code></td></tr>
+    <tr><td><code>arr.findIndex(f)</code></td><td><code>next((i for i,x in enumerate(arr) if f(x)), -1)</code></td><td>找第一个的下标</td></tr>
+    <tr><td><code>arr.some(f)</code></td><td><code>any(f(x) for x in arr)</code></td><td>有一个满足就真</td></tr>
+    <tr><td><code>arr.every(f)</code></td><td><code>all(f(x) for x in arr)</code></td><td>全都满足才真</td></tr>
+    <tr><td><code>arr.reduce(f, init)</code></td><td><code>functools.reduce</code></td><td>归约（少用，本项目只出现一次）</td></tr>
+    <tr><td><code>arr.includes(x)</code></td><td><code>x in arr</code></td><td>包含</td></tr>
+    <tr><td><code>arr.sort(cmp)</code></td><td><code>arr.sort(key=...)</code></td><td><b>原地排序</b>（注意！）</td></tr>
+    <tr><td><code>arr.slice(a, b)</code></td><td><code>arr[a:b]</code></td><td>切片（返回新数组）</td></tr>
+    <tr><td><code>arr.splice(i, n, x)</code></td><td><code>del arr[i:i+n]</code> + <code>insert</code></td><td><b>原地</b>删除/插入</td></tr>
+    <tr><td><code>arr.join(', ')</code></td><td><code>', '.join(arr)</code></td><td>拼接（注意方向相反！）</td></tr>
+    <tr><td><code>arr.push(x)</code></td><td><code>arr.append(x)</code></td><td>尾部加一个</td></tr>
+  </tbody>
+</table>
+
+<p>看一段真实代码，这里连用了三个：</p>
+
+<div class="filename">index.js:147（为一个字符串拼装，略微改写换行）</div>
+<pre><code>`${s.mods.filter((m) =&gt; m.source === 'workshop').length} workshop`</code></pre>
+
+<p>再来一段更有代表性的：</p>
+
+<div class="filename">src/host/sorter.js:206-213（sortRimSort，换行调整）</div>
+<pre><code>for (const k of keys) {
+  const m = catalog.get(k)
+  const r = R(k)
+  for (const t of [...(m?.loadAfter || []), ...(m?.forceLoadAfter || []), ...Object.keys(r.loadAfter || {})]) add(k, t)
+  for (const t of [...(m?.loadBefore || []), ...(m?.forceLoadBefore || []), ...Object.keys(r.loadBefore || {})]) add(t, k)
+  if (r.loadTop &amp;&amp; !RS_TIER0.includes(k)) tier1.add(k)
+  if (r.loadBottom) tier3.add(k)
+}</code></pre>
+
+<p>Python 等价物：</p>
+
+<pre><code>for k in keys:
+    m = catalog.get(k)
+    r = R(k)
+    for t in [*(m.loadAfter or []), *(m.forceLoadAfter or []), *r.loadAfter.keys()]:
+        add(k, t)
+    ...</code></pre>
+
+<div class="tip">
+  <b>注意 <code>for (const k of keys)</code></b>
+  <p><code>for...of</code> 才是 Python 的 <code>for x in iterable</code>。<code>for...in</code> 是遍历索引/键名，<b>不是</b>你想要的东西。看到 <code>of</code> 就对了。</p>
+</div>
+
+<h3><code>.sort()</code> 的两个坑</h3>
+
+<div class="warn">
+  <b>坑一：默认按字符串排</b>
+  <p><code>[10, 9, 1].sort()</code> 得到 <code>[1, 10, 9]</code>！必须传比较函数：<code>.sort((a,b) =&gt; a - b)</code>。</p>
+  <p><b>坑二：原地修改</b></p>
+  <p><code>arr.sort()</code> 会改掉 <code>arr</code> 本身（Python 也一样），所以本项目常常先复制：</p>
+  <pre><code>return [...keys].sort((a, b) =&gt; collator.compare(...))</code></pre>
+  <p>（<code>src/host/sorter.js:174</code>）</p>
+</div>
+
+<p>比较函数的约定：返回负数 = a 在前，正数 = b 在前，0 = 相等。这正是 Python <code>key=</code> 背后做的事，只是 JS 让你手写。</p>
+
+<div class="filename">src/host/sorter.js:174</div>
+<pre><code>return [...keys].sort((a, b) =&gt; collator.compare(sortName(a, catalog), sortName(b, catalog)) || collator.compare(a, b))</code></pre>
+
+<p>这里的 <code>||</code> 用得妙：如果第一个比较返回 0（名字一样），就退而比较 key。典型的"多级排序"。</p>
+
+<h2>9. <code>Map</code> 和 <code>Set</code> —— 和 Python 的 dict/set 几乎一样</h2>
+
+<p>这个项目大量使用 <code>Map</code> 而不是普通对象，因为 mod 的 key 可能包含点号、可能有特殊字符，用 <code>Map</code> 更安全也更快。</p>
+
+<table>
+  <thead><tr><th>操作</th><th>JS Map</th><th>Python dict</th></tr></thead>
+  <tbody>
+    <tr><td>创建</td><td><code>new Map()</code></td><td><code>{}</code></td></tr>
+    <tr><td>从数组建</td><td><code>new Map(arr.map(m =&gt; [m.key, m]))</code></td><td><code>{m["key"]: m for m in arr}</code></td></tr>
+    <tr><td>取</td><td><code>m.get(k)</code> → 没有则 <code>undefined</code></td><td><code>d.get(k)</code></td></tr>
+    <tr><td>存</td><td><code>m.set(k, v)</code></td><td><code>d[k] = v</code></td></tr>
+    <tr><td>判断存在</td><td><code>m.has(k)</code></td><td><code>k in d</code></td></tr>
+    <tr><td>删除</td><td><code>m.delete(k)</code></td><td><code>del d[k]</code></td></tr>
+    <tr><td>大小</td><td><code>m.size</code>（属性，无括号）</td><td><code>len(d)</code></td></tr>
+    <tr><td>遍历</td><td><code>m.forEach((v, k) =&gt; ...)</code> 或 <code>for (const [k, v] of m)</code></td><td><code>d.items()</code></td></tr>
+    <tr><td>转数组</td><td><code>[...m.values()]</code></td><td><code>list(d.values())</code></td></tr>
+  </tbody>
+</table>
+
+<div class="filename">src/client/store.js:38</div>
+<pre><code>const catalog = useMemo(() =&gt; new Map((snap?.mods || []).map((m) =&gt; [m.key, m])), [snap])</code></pre>
+
+<p>一行做了三件事：把 mod 数组转成 <code>[key, mod]</code> 二元组数组，再建成 <code>Map</code>，存进一个 memory 化的变量。后面就能 <code>catalog.get('brrainz.harmony')</code> 了。</p>
+
+<h3>Set 最常见的用法：去重 + 快速判断"在不在"</h3>
+
+<div class="filename">src/host/sorter.js:39</div>
+<pre><code>const active = new Set(activeKeys)</code></pre>
+
+<p>然后全篇都是 <code>if (!active.has(a)) return</code>。如果用数组，每次都要 <code>includes()</code> 线性扫描；<code>Set.has()</code> 是 O(1)。</p>
+
+<h2>10. 模块：<code>export</code> / <code>import</code></h2>
+
+<p>注意 <code>package.json</code> 里有一行 <code>"type": "module"</code> —— 这意味着这个项目用的是 <b>ESM</b>（和 Python 的模块最接近），不是老的 CommonJS（<code>require</code>）。</p>
+
+<div class="grid2">
+  <div class="card">
+    <h4>命名导出（可以有多个）</h4>
+    <pre style="margin:6px 0"><code>export function pid(s) {...}
+export const CORE_ID = '...'
+export { scanMods, CORE_ID }</code></pre>
+  </div>
+  <div class="card">
+    <h4>默认导出（只能有一个）</h4>
+    <pre style="margin:6px 0"><code>export default plugin</code></pre>
+  </div>
+</div>
+
+<div class="filename">src/host/sorter.js:20-21</div>
+<pre><code>import { pid } from './xml.js'
+import { CORE_ID, KNOWN_EXPANSIONS } from './scan.js'</code></pre>
+
+<div class="warn">
+  <b>三个和 Python 不同的地方</b>
+  <ol style="margin-bottom:0">
+    <li><b>路径必须写 <code>.js</code> 后缀</b>。Python 是 <code>from .xml import pid</code>，JS 必须 <code>from './xml.js'</code>。</li>
+    <li><b>相对路径必须以 <code>./</code> 或 <code>../</code> 开头</b>。<code>from 'xml.js'</code> 会被当成 npm 包去找。</li>
+    <li><b>import 会被"提升"到文件最顶部执行</b>，不能像 Python 那样写在函数里按需导入（虽然有动态 <code>import()</code>，本项目不用）。</li>
+  </ol>
+</div>
+
+<h2>11. 异步：<code>async</code> / <code>await</code> / Promise</h2>
+
+<p>这块和 Python 的 <code>asyncio</code> 概念一样，但语法细节要记。</p>
+
+<div class="filename">思路对比</div>
+<pre><code><span class="c"># Python</span>
+async def rescan():
+    text = await read_file(path)
+    return parse(text)
+
+<span class="c">// JavaScript</span>
+const rescan = async () =&gt; {
+  const text = await readFile(path, 'utf8')
+  return parse(text)
+}</code></pre>
+
+<p>真实代码：</p>
+
+<div class="filename">src/host/service.js:124-137</div>
+<pre><code>const rescan = async () =&gt; {
+  state.discovered = await discoverPaths()
+  const p = effectivePaths()
+  state.game = await readGameVersion(p.gameDir)
+  const r = await scanMods({ ...p, major: state.game?.major, extraDirs: p.extraModDirs })
+  state.catalog = r.byId
+  state.mods = r.mods
+  state.duplicates = r.duplicates
+  state.scannedAt = Date.now()
+  await loadConfig()
+  ...
+  return { count: r.mods.length }
+}</code></pre>
+
+<p>几乎逐行对应 Python 的 <code>async def</code>。</p>
+
+<h3>并发：<code>Promise.all</code> ≈ <code>asyncio.gather</code></h3>
+
+<div class="filename">src/host/scan.js:116-121</div>
+<pre><code>await Promise.all(
+  names.map(async (name) =&gt; {
+    const m = await scanOne(path.join(base, name), source, major, name)
+    if (m) found.push(m)
+  }),
+)</code></pre>
+
+<p>同时扫描所有 mod 文件夹（每个都要读 XML），比一个个 await 快得多。<code>Promise.all</code> 会等所有任务全部完成。</p>
+
+<div class="tip">
+  <b>和 Python 的一个重要区别</b>
+  <p>JS 是<b>单线程</b>的。没有"几个函数真并行跑"，只是"等 I/O 的时候切换到别的任务"。所以这段代码里 <code>found.push(m)</code> 不需要加锁 —— 永远不会有两段代码同时执行。这反而比 Python 多线程简单。</p>
+</div>
+
+<h3><code>.then()</code> 链 —— 另一种写法</h3>
+
+<div class="filename">index.js:31-34</div>
+<pre><code>service.init().then(
+  () =&gt; log(`ready: ${service.state.mods.length} mods`),
+  (e) =&gt; log('init failed: ' + (e &amp;&amp; e.message)),
+)</code></pre>
+
+<p><code>.then(成功回调, 失败回调)</code> 是 <code>await</code> 还没出现时的写法。<b>它不会阻塞</b> —— 这行执行完立刻继续往下走，初始化在后台跑。这就是为什么 <code>index.js</code> 能先启动服务、后注册路由。</p>
+
+<h3>五个函数长得像 async 但不是：注意分辨</h3>
+
+<table>
+  <thead><tr><th>写法</th><th>是什么</th></tr></thead>
+  <tbody>
+    <tr><td><code>async () =&gt; {...}</code></td><td>异步函数，返回 Promise</td></tr>
+    <tr><td><code>() =&gt; promise</code></td><td>返回 Promise 的普通函数（如 <code>const init = () =&gt; (state.ready ||= ...)</code>）</td></tr>
+    <tr><td><code>() =&gt; api('snapshot')</code></td><td>同上，<code>api</code> 内部是 async</td></tr>
+    <tr><td><code>await service.dispatch(...)</code></td><td>等它完成</td></tr>
+    <tr><td>忘了 <code>await</code></td><td><b>拿到一个 Promise 对象而不是结果</b> —— 最常见的 bug</td></tr>
+  </tbody>
+</table>
+
+<h2>12. 模板字符串 —— 反引号</h2>
+
+<p>Python 的 f-string，JS 用反引号 <code>`</code>（键盘左上角 Esc 下面那个）加 <code>${}</code>。</p>
+
+<pre><code>const msg = `共 ${mods.length} 个 mod，${active.length} 个已启用`</code></pre>
+
+<p>Python：<code>msg = f"共 {len(mods)} 个 mod，{len(active)} 个已启用"</code></p>
+
+<p>本项目<b>全靠这个拼接命令行输出</b>。看一个典型的：</p>
+
+<div class="filename">index.js:133</div>
+<pre><code>lines.push(`${i.level === 'error' ? '✖' : i.level === 'warning' ? '⚠' : 'ℹ'} [${i.code}] ${i.modName} (${i.mod}): ${i.message}${i.steam?.url ? ' → ' + i.steam.url : ''}`)</code></pre>
+
+<p>这里有嵌套三元、嵌套模板、可选链 —— 一眼看不懂很正常。拆开看就是拼一句话：图标 + 错误码 + mod 名 + 消息 + 链接（如果有）。</p>
+
+<h2>13. Object 工具的常用几招</h2>
+
+<div class="filename">src/host/sorter.js:60</div>
+<pre><code>for (const [t, info] of Object.entries(rules.loadAfter)) addEdge(...)</code></pre>
+
+<table>
+  <thead><tr><th>JS</th><th>Python</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td><code>Object.keys(o)</code></td><td><code>list(o.keys())</code></td><td>键数组</td></tr>
+    <tr><td><code>Object.values(o)</code></td><td><code>list(o.values())</code></td><td>值数组</td></tr>
+    <tr><td><code>Object.entries(o)</code></td><td><code>list(o.items())</code></td><td><code>[k,v]</code> 二元组数组</td></tr>
+    <tr><td><code>Object.fromEntries(arr)</code></td><td><code>dict(arr)</code></td><td>反向</td></tr>
+    <tr><td><code>Object.assign({}, a, b)</code></td><td><code>{**a, **b}</code></td><td>合并（本项目更爱用 <code>{...a, ...b}</code>）</td></tr>
+  </tbody>
+</table>
+
+<p>注意 <code>for (const [t, info] of Object.entries(...))</code> —— 这里同时用了"遍历 <code>of</code>"和"数组解构",很浓缩的一行。</p>
+
+<h2>14. 其它零碎但会遇到</h2>
+
+<h3>字符串方法</h3>
+<table>
+  <thead><tr><th>JS</th><th>Python</th></tr></thead>
+  <tbody>
+    <tr><td><code>s.toLowerCase()</code> / <code>s.toUpperCase()</code></td><td><code>s.lower()</code> / <code>s.upper()</code></td></tr>
+    <tr><td><code>s.trim()</code></td><td><code>s.strip()</code></td></tr>
+    <tr><td><code>s.includes('x')</code></td><td><code>'x' in s</code></td></tr>
+    <tr><td><code>s.startsWith('x')</code></td><td><code>s.startswith('x')</code></td></tr>
+    <tr><td><code>s.split(/\s+/)</code></td><td><code>re.split(r'\s+', s)</code></td></tr>
+    <tr><td><code>s.replace(/a/g, 'b')</code></td><td><code>re.sub('a', 'b', s)</code></td></tr>
+    <tr><td><code>s.slice(0, 600)</code></td><td><code>s[:600]</code></td></tr>
+    <tr><td><code>s.match(/\d+/)?.[0]</code></td><td><code>re.search(r'\d+', s).group()</code></td></tr>
+    <tr><td><code>s.matchAll(/x/g)</code></td><td><code>re.finditer('x', s)</code></td></tr>
+  </tbody>
+</table>
+
+<div class="note">
+  <b>正则字面量</b>
+  <p>JS 里正则用 <code>/.../</code> 包起来，不用 <code>re.compile</code>。<code>g</code> 是全局标志（找到所有），<code>i</code> 是忽略大小写。</p>
+  <pre><code>/^\d+$/.test(t)              <span class="c">// ≈ bool(re.fullmatch(r'\d+', t))</span>
+text.matchAll(/"path"\s+"([^"]+)"/g)  <span class="c">// ≈ re.finditer(r'...', text)</span></code></pre>
+  <p><code>src/host/paths.js:49</code> 就用它解析 Steam 的 VDF 配置文件。</p>
+</div>
+
+<h3>数字与时间</h3>
+<pre><code>Date.now()                              <span class="c">// 毫秒时间戳，≈ int(time.time() * 1000)</span>
+new Date().toISOString()                <span class="c">// ISO 字符串</span>
+(ms / 1048576).toFixed(1)               <span class="c">// 保留一位小数，≈ round(x, 1)（但 toFixed 返回字符串）</span>
+Math.max(0, Math.min(len, n))           <span class="c">// ≈ max(0, min(len, n))</span>
+Math.floor(x)                           <span class="c">// ≈ x // 1（注意不是 int(x)，负数不一样）</span>
+Number(x) || 0                          <span class="c">// ≈ int(x or 0)</span></code></pre>
+
+<h3>JSON</h3>
+<pre><code>JSON.stringify(obj)         <span class="c">// → 字符串   ≈ json.dumps</span>
+JSON.stringify(obj, null, 2) <span class="c">// 带缩进</span>
+JSON.parse(str)             <span class="c">// → 对象     ≈ json.loads</span></code></pre>
+
+<div class="tip">
+  <b>一个 hack，但在这项目里是有意的设计</b>
+  <p><code>index.js:123</code> 有这一行：</p>
+  <pre><code>return JSON.parse(JSON.stringify({ ok: true, ...(await ...) }))</code></pre>
+  <p>先把结果转成 JSON 字符串再转回来。为什么？因为要<b>丢掉 undefined、Map、Set、函数</b>这类东西，只留下干净的 JSON 数据（AI 工具的输出必须能被序列化）。Python 里你会写 <code>json.loads(json.dumps(x, default=str))</code> 做同样的事。</p>
+</div>
+
+<h3>控制流：没有 <code>elif</code>，没有 <code>pass</code></h3>
+<pre><code>if (a) {
+  ...
+} else if (b) {
+  ...
+} else {
+  ...
+}
+
+try {
+  ...
+} catch {
+  ...
+} finally {
+  ...       <span class="c">// 可选，≈ finally</span>
+}</code></pre>
+
+<p>注意 <code>catch</code> 后面可以不带括号（不关心异常对象）。本项目大量使用"空 catch"来静默忽略错误：</p>
+
+<pre><code>try {
+  mtime = (await stat(about.path)).mtimeMs
+} catch {}</code></pre>
+
+<p>（<code>src/host/scan.js:79-81</code>）文件读不到就当作 mtime 是 0，不影响主流程。</p>
+
+<h3><code>switch</code>（本项目只在大分发里用一次）</h3>
+
+<div class="filename">index.js:340-350</div>
+<pre><code>switch (args.action) {
+  case 'list': return run('lists', {})
+  case 'get': return run('getList', { id: args.id })
+  case 'save': return run('saveList', { ... })
+  default: return { ok: false, error: 'unknown action' }
+}</code></pre>
+
+<p>⚠️ JS 的 <code>case</code> <b>不会自动 break</b>（会往下穿透）。这里因为每个 case 都 <code>return</code> 了，所以安全。写新 case 时记得 return 或 break。</p>
+
+<h2>15. 该跳过的语法</h2>
+
+<p>这个项目里你基本看不到以下东西，不用花时间学：</p>
+
+<table>
+  <thead><tr><th>不用担心的</th><th>为什么</th></tr></thead>
+  <tbody>
+    <tr><td><code>class</code> / <code>this</code></td><td>全项目用工厂函数 + 闭包，几乎零 class</td></tr>
+    <tr><td><code>prototype</code> / 继承</td><td>完全不用</td></tr>
+    <tr><td><code>var</code>、<code>==</code></td><td>作者严格用 <code>const</code>/<code>let</code> 和 <code>===</code></td></tr>
+    <tr><td>TypeScript 类型标注</td><td>纯 JS，没有 <code>: string</code> 这种东西</td></tr>
+    <tr><td>Webpack / 复杂构建</td><td>一个 <code>build.mjs</code>，用 esbuild 一行搞定</td></tr>
+    <tr><td>Redux / Vuex 等状态库</td><td>就一个 <code>useState</code> + 手工 cURL（第 7 页）</td></tr>
+  </tbody>
+</table>
+
+<h2>16. 现在试一下：读懂这 4 行</h2>
+
+<p>这是 <code>src/host/service.js</code> 里真实的一行（第 93 行）。用上面的知识拆解它：</p>
+
+<div class="filename">src/host/service.js:92-96</div>
+<pre><code>const mergeDb = (d) =&gt; {
+  const out = JSON.parse(JSON.stringify(DEFAULT_DB_CONFIG))
+  for (const k of DB_KEYS) if (d &amp;&amp; d[k] &amp;&amp; typeof d[k] === 'object') out[k] = { ...out[k], ...d[k] }
+  return out
+}</code></pre>
+
+<details>
+  <summary>点开看逐行解释</summary>
+  <ol>
+    <li><code>const mergeDb = (d) =&gt; { ... }</code><br>定义函数 <code>mergeDb</code>，参数 <code>d</code>。返回函数体最后 <code>return</code> 的东西。</li>
+    <li><code>JSON.parse(JSON.stringify(DEFAULT_DB_CONFIG))</code><br>深拷贝。<code>JSON.stringify</code> 转成文本，<code>JSON.parse</code> 再转回对象 —— 这样新对象和原来的完全没关系，改动不会影响 <code>DEFAULT_DB_CONFIG</code> 常量。Python: <code>copy.deepcopy(DEFAULT_DB_CONFIG)</code></li>
+    <li><code>for (const k of DB_KEYS)</code><br>遍历键名数组。</li>
+    <li><code>if (d &amp;&amp; d[k] &amp;&amp; typeof d[k] === 'object')</code><br>三道检查：<code>d</code> 存在、<code>d[k]</code> 存在、<code>d[k]</code> 确实是对象。<code>typeof</code> 是 JS 的 <code>type()</code>。</li>
+    <li><code>out[k] = { ...out[k], ...d[k] }</code><br>用用户配置里的值覆盖默认值，<b>但保留默认值里用户没提到的字段</b>。这是"合并配置"的标准写法。</li>
+    <li><code>return out</code><br>返回合并后的新对象。</li>
+  </ol>
+  <p>Python 等价物：</p>
+  <pre><code>def merge_db(d):
+    out = copy.deepcopy(DEFAULT_DB_CONFIG)
+    for k in DB_KEYS:
+        if d and d.get(k) and isinstance(d[k], dict):
+            out[k] = {**out[k], **d[k]}
+    return out</code></pre>
+  <p>看，几乎一模一样。这就是为什么你会 Python 就能读这个项目。</p>
+</details>
+
+<h2>17. JSX 一分钟预览</h2>
+
+<p><code>.jsx</code> 文件里有一种"看起来像 HTML"的东西。它<b>不是</b>字符串，编译后是普通函数调用。</p>
+
+<div class="filename">src/client/api.js 附近的思路</div>
+<pre><code>&lt;button className="rl-btn" onClick={actions.save} disabled={dirty}&gt;
+  {t('save')}
+&lt;/button&gt;
+
+<span class="c">// 编译后大致是：</span>
+React.createElement('button', { className: 'rl-btn', onClick: ..., disabled: ... }, t('save'))</code></pre>
+
+<table>
+  <thead><tr><th>JSX</th><th>HTML 里的区别</th></tr></thead>
+  <tbody>
+    <tr><td><code>className</code></td><td>不是 <code>class</code>（class 是 JS 关键字）</td></tr>
+    <tr><td><code>{表达式}</code></td><td>用花括号插入 JS 值，不是 <code>{{ }}</code> 模板</td></tr>
+    <tr><td><code>onClick={fn}</code></td><td>传的是函数本身，不是字符串</td></tr>
+    <tr><td><code>&lt;br /&gt;</code></td><td>单标签必须自闭合</td></tr>
+    <tr><td>只能返回一个根元素</td><td>多个并列要包一层 <code>&lt;&gt;...&lt;/&gt;</code></td></tr>
+  </tbody>
+</table>
+
+<p>第 7 页会用真实的界面代码详细讲。现在你只需要认出它是"界面描述"就行。</p>
+
+<div class="note">
+  <b>准备出发</b>
+  <p>语法补完了。接下来从 <code>index.js</code> 开始，看这些语法是怎么组合成一个真实功能的。</p>
+</div>
+
+<div class="pager">
+  <a href="index.html"><span>上一页</span>← 0 · 先看这里</a>
+  <a href="02-entry.html" class="nx"><span>下一页</span>2 · 入口 index.js →</a>
+</div>
+
+</main>
+</body>
+</html>

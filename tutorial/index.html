@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RimList 代码导读 · 首页</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="side">
+  <div class="brand">
+    <b>RimList 代码导读</b>
+    <span>写给会一点 Python 的人</span>
+  </div>
+  <a href="index.html" class="on">0 · 先看这里</a>
+  <a href="01-js.html">1 · JS 速通</a>
+  <a href="02-entry.html">2 · 入口 index.js</a>
+  <a href="03-scan.html">3 · 扫描 mod</a>
+  <a href="04-sort.html">4 · 排序与诊断</a>
+  <a href="05-rules.html">5 · 规则库与列表</a>
+  <a href="06-service.html">6 · service.js</a>
+  <a href="07-client.html">7 · 前端 React</a>
+  <a href="08-hands-on.html">8 · 动手改与测试</a>
+  <div class="side-foot">
+    每一段代码都是从仓库里直接摘出来的真实代码，标注了文件路径。行号和仓库当前状态一致。
+  </div>
+</nav>
+
+<main>
+
+<div class="kicker">RimWorld Mod 管理器 · 源码阅读课</div>
+
+<h1>
+  读懂 rimlist
+  <span class="sub">这是一个 DeepSeek Harness 的插件，用 JavaScript 写的。你懂一点 Python，但没写过 JS —— 这份导读就是为你准备的。</span>
+</h1>
+
+<div class="hero">
+  <p><b>先说结论：这个项目不需要你"通读全部 9000 行"。</b>它有 30 多个文件，但真正的主干只有 6 个。读懂这 6 个，你就能自己改功能了。</p>
+  <p>这份导读的顺序就是读代码的顺序：先补 JS 语法（第 1 页），再从入口一路往下走（第 2–6 页），最后看界面怎么画出来（第 7 页）。</p>
+</div>
+
+<h2>这个项目到底在干什么</h2>
+
+<p>RimWorld 玩家装几十上百个 mod，游戏能不能跑起来，全看 <b>加载顺序</b>：A 必须在 B 前面，B 依赖 C，D 和 E 不能同时开……手排非常痛苦。</p>
+
+<p><b>RimList</b> 就是来解决这件事的。它做的事，用一句话说：</p>
+
+<div class="note">
+  <b>一句话</b>
+  <p>读一堆 XML（每个 mod 的 <code>About.xml</code>）→ 建成一张"谁必须在谁前面"的图 → 拓扑排序 → 把结果写回游戏的 <code>ModsConfig.xml</code>。</p>
+</div>
+
+<p>剩下的所有代码，都是这句话的配套：怎么找到 mod 文件夹、规则库从哪下载、界面上怎么拖拽、出错了怎么诊断、怎么把顺序分享给别人。</p>
+
+<h2>程序分成两半</h2>
+
+<p>打开仓库你立刻会看到一个分叉：<code>src/host</code> 和 <code>src/client</code>。这不是风格问题，是<b>两个不同的运行环境</b>。这是理解整个项目最重要的一件事。</p>
+
+<div class="grid2">
+  <div class="card">
+    <h4><span class="tag b">host</span> 后端 · Node.js</h4>
+    <p>跑在电脑上（通过 DSH 主进程），能读文件、能起 HTTP 服务、能执行 git 命令。</p>
+    <p>负责：扫描磁盘、解析 XML、排序、诊断、写配置文件。</p>
+    <p><code>index.js</code> + <code>src/host/*.js</code></p>
+  </div>
+  <div class="card">
+    <h4><span class="tag">client</span> 前端 · 浏览器</h4>
+    <p>跑在网页里（DSH 的 Web 界面），<b>不能碰文件系统</b>，只能发网络请求。</p>
+    <p>负责：画界面、拖拽、点按钮 → 调后端。</p>
+    <p><code>src/client/*.jsx</code></p>
+  </div>
+</div>
+
+<p>两边唯一的联系方式是一个 HTTP 接口：</p>
+
+<div class="filename">src/client/api.js（节选）</div>
+<pre><code>const res = await fetch('/api/rimlist', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ method, args }),
+})</code></pre>
+
+<p>前端把"我要做什么"打包成 <code>{ method: 'sortIds', args: {...} }</code> 发过去，后端做完把 JSON 结果发回来。就这么简单 —— 前端永远不知道 <code>ModsConfig.xml</code> 在哪。</p>
+
+<div class="filename">数据流全景</div>
+<div class="flow">浏览器（src/client）
+  store.js  api('sortIds', { ids })          ← 用户点了「⇅ 排序」
+        │
+        │  POST /api/rimlist   { method: 'sortIds', args: { ids } }
+        ▼
+index.js  httpHandler()                       ← 校验同源、读 body、解析 JSON
+        │
+        ▼
+src/host/service.js  methods.sortIds
+        │
+        ├─ sortLoadOrder(keys, catalog, rules)   ← src/host/sorter.js 真正的算法
+        └─ diagnose(...)                          ← 顺便算一下有没有问题
+        │
+        ▼
+   { ok: true, result: { order: [...] } }     JSON 原路返回
+        │
+        ▼
+store.js  setDraft(r.order)                   ← 只是"草稿"，还没写盘！
+
+用户再点「保存到游戏」→ api('setActive') → writeConfig() → ModsConfig.xml（先备份）</div>
+
+<div class="tip">
+  <b>注意最后两步是分开的</b>
+  <p>排序只改界面里的草稿，不写文件。只有点「保存到游戏」才真的写 <code>ModsConfig.xml</code>。所以你在界面上怎么折腾都不会弄坏游戏配置 —— 这对读代码也有用：写盘的地方只有一处。</p>
+</div>
+
+<h2>目录结构</h2>
+
+<div class="tree">rimlist/
+├── index.js              <span class="dim">← 插件入口：注册 HTTP 路由 + 31 个 AI 工具（685 行）</span>
+├── build.mjs             <span class="dim">← 用 esbuild 把前端打包成 lib/client.js</span>
+├── cordis.patch.yml      <span class="dim">← 告诉 DSH"把这个插件装进去"</span>
+├── package.json          <span class="dim">← 项目定义、依赖、npm 脚本</span>
+│
+├── src/host/             <span class="dim">← 后端（Node.js）</span>
+│   ├── service.js        <span class="dim">← 核心大脑：所有能力的总调度（1228 行，最大文件）</span>
+│   ├── sorter.js         <span class="dim">← 拓扑排序 + 诊断（这个项目的灵魂）</span>
+│   ├── scan.js           <span class="dim">← 扫描磁盘找到所有 mod</span>
+│   ├── xml.js            <span class="dim">← 解析 About.xml / 写 ModsConfig.xml</span>
+│   ├── rules.js          <span class="dim">← 下载和维护 5 个规则库</span>
+│   ├── lists.js          <span class="dim">← 命名列表：保存/导入/导出/对比</span>
+│   ├── classify.js       <span class="dim">← 猜 mod 类型（内容/框架/汉化…）</span>
+│   ├── modversions.js    <span class="dim">← 更新记录、备份、git</span>
+│   ├── paths.js          <span class="dim">← 找 RimWorld 装在哪</span>
+│   ├── launch.js         <span class="dim">← 启动游戏</span>
+│   ├── process.js        <span class="dim">← 查/停游戏进程</span>
+│   ├── gamelog.js        <span class="dim">← 解析 Player.log</span>
+│   ├── archive.js        <span class="dim">← 解 gz/zip</span>
+│   └── logger.js         <span class="dim">← 调试日志</span>
+│
+├── src/client/           <span class="dim">← 前端（浏览器里的 React）</span>
+│   ├── entry.jsx         <span class="dim">← 前端入口：把界面挂到 DSH 侧栏</span>
+│   ├── app.jsx           <span class="dim">← 主界面骨架、顶栏按钮</span>
+│   ├── columns.jsx       <span class="dim">← 已启用/未启用两栏 + 拖拽</span>
+│   ├── panels.jsx        <span class="dim">← 详情、诊断、列表、规则、设置（998 行）</span>
+│   ├── versions.jsx      <span class="dim">← 版本/更新/备份面板</span>
+│   ├── logpanel.jsx      <span class="dim">← 游戏日志查看器</span>
+│   ├── store.js          <span class="dim">← 界面状态管理（草稿、脏标记、toast）</span>
+│   ├── api.js            <span class="dim">← 就那一个 fetch</span>
+│   ├── i18n.js           <span class="dim">← 中英文案表</span>
+│   └── styles.css        <span class="dim">← 样式</span>
+│
+├── test/                 <span class="dim">← 10 个测试文件，node --test 直接跑</span>
+├── scripts/              <span class="dim">← 开发时手动跑的检查脚本</span>
+└── lib/client.js         <span class="dim">← 打包产物（别手改，是 build 生成的）</span></div>
+
+<p>先记住三个名字就够了：<code>index.js</code>（入口）、<code>service.js</code>（总调度）、<code>sorter.js</code>（算法核心）。</p>
+
+<h2>Python 知识能直接用在哪</h2>
+
+<p>好消息：这个项目的<b>代码风格非常"Pythonic"</b>。作者大量用纯函数、不可变数据、没有 class、没有 <code>this</code> 满天飞。你已有的经验大部分能直接迁移。</p>
+
+<table>
+  <thead><tr><th>你已经会的（Python）</th><th>在这里对应什么（JS）</th><th>难度</th></tr></thead>
+  <tbody>
+    <tr><td>函数、参数、返回值</td><td>基本一样，只是写法更短</td><td>⭐</td></tr>
+    <tr><td><code>dict</code> / <code>list</code></td><td><code>Object</code> / <code>Array</code>（还有 <code>Map</code> / <code>Set</code>）</td><td>⭐</td></tr>
+    <tr><td>推导式</td><td><code>.map()</code> <code>.filter()</code> <code>.reduce()</code></td><td>⭐⭐</td></tr>
+    <tr><td><code>async</code> / <code>await</code></td><td>几乎一模一样</td><td>⭐⭐</td></tr>
+    <tr><td>模块与 <code>import</code></td><td>ESM：<code>export</code> / <code>import</code></td><td>⭐⭐</td></tr>
+    <tr><td>类型注解</td><td>没有（纯 JS），靠命名和注释</td><td>—</td></tr>
+    <tr><td>闭包、装饰器</td><td>闭包一样；装饰器 ≈ 高阶函数</td><td>⭐⭐⭐</td></tr>
+    <tr><td>类与继承</td><td><b>本项目基本不用 class</b>，用工厂函数返回对象</td><td>⭐⭐</td></tr>
+    <tr><td>异常 <code>try/except</code></td><td><code>try/catch</code>，语义相同</td><td>⭐</td></tr>
+    <tr><td>—</td><td><b>回调函数</b>（把函数当参数传来传去）</td><td>⭐⭐⭐</td></tr>
+    <tr><td>—</td><td><b>Promise 链</b> 与 <code>.then()</code></td><td>⭐⭐⭐</td></tr>
+    <tr><td>—</td><td><b>JSX</b>（在 JS 里写类似 HTML 的东西）</td><td>⭐⭐⭐</td></tr>
+  </tbody>
+</table>
+
+<p>最后三行是需要新学的东西，第 1 页会把它们全讲清楚。JSX 只在前端出现，如果你想先懂后端的算法，可以先跳过第 7 页。</p>
+
+<h2>建议的阅读路线</h2>
+
+<ol class="steps">
+  <li>
+    <b>第 1 页 · JS 速通</b><br>
+    一次性补上语法差异。别背，对照着看就行，后面遇到看不懂的再回来查。重点是：箭头函数、<code>?.</code> 和 <code>??</code>、解构、数组三兄弟、<code>async/await</code>。
+  </li>
+  <li>
+    <b>第 2 页 · 入口 index.js</b><br>
+    看一个插件是怎么"活起来"的：<code>apply(ctx)</code> 被调用，然后注册 HTTP 路由和工具。
+  </li>
+  <li>
+    <b>第 3 页 · 扫描 mod</b><br>
+    从"RimWorld 装在哪"到"内存里有一个 mod 对象"。这里会看到真实 XML 解析代码。
+  </li>
+  <li>
+    <b>第 4 页 · 排序与诊断</b><br>
+    <b>最重要的一页。</b>拓扑排序、优先级、环怎么破。算法本身不难，难的是理解"为什么需要这张图"。
+  </li>
+  <li>
+    <b>第 5 页 · 规则库与列表</b><br>
+    排序用的约束从哪来：5 个 GitHub 规则库 + 你自己的规则。以及"分享 mod 列表"怎么实现。
+  </li>
+  <li>
+    <b>第 6 页 · service.js</b><br>
+    把所有零件串起来的总调度。看完你就知道"想加一个新功能要改哪几处"。
+  </li>
+  <li>
+    <b>第 7 页 · 前端 React</b><br>
+    可选但推荐。看懂 React 的"状态"概念，界面代码就不神秘了。
+  </li>
+  <li>
+    <b>第 8 页 · 动手改</b><br>
+    跑测试、加一个自己的规则、修一个小 bug 的完整流程。
+  </li>
+</ol>
+
+<h2>读代码前需要知道的 RimWorld 概念</h2>
+
+<p>不用会玩游戏，但这几个词会反复出现：</p>
+
+<table>
+  <thead><tr><th>概念</th><th>含义</th><th>在代码里</th></tr></thead>
+  <tbody>
+    <tr><td><b>packageId</b></td><td>mod 的全局唯一 ID，像 <code>brrainz.harmony</code>。RimWorld 认这个，不认文件夹名。</td><td><code>m.key</code>（永远小写）和 <code>m.packageId</code>（保留原样大小写）</td></tr>
+    <tr><td><b>About.xml</b></td><td>每个 mod 必须有的一张名片：名字、作者、支持版本、加载顺序要求。</td><td><code>src/host/xml.js</code> 的 <code>parseAbout()</code></td></tr>
+    <tr><td><b>ModsConfig.xml</b></td><td>游戏记住"你启用了哪些 mod、按什么顺序"的文件。<b>改这个文件就等于改加载顺序。</b></td><td><code>buildModsConfig()</code> 写它，<code>parseModsConfig()</code> 读它</td></tr>
+    <tr><td><b>loadAfter</b></td><td>About.xml 里声明"我要在某 mod 之后加载"。</td><td><code>mod.loadAfter</code></td></tr>
+    <tr><td><b>loadBottom / loadTop</b></td><td>社区约定：置底（补丁类）和置顶（框架类）。</td><td>规则库里的 <code>loadBottom</code> / <code>loadTop</code></td></tr>
+    <tr><td><b>Core / DLC</b></td><td>游戏本体（<code>ludeon.rimworld</code>）和官方资料片（Royalty、Ideology…）。永远排最前。</td><td><code>CORE_ID</code>、<code>KNOWN_EXPANSIONS</code>（scan.js）</td></tr>
+    <tr><td><b>Harmony</b></td><td>几乎所有代码 mod 的前置库，必须比 Core 还早加载。</td><td>sorter.js 里的 <code>RS_TIER0</code> 第一个就是它</td></tr>
+    <tr><td><b>创意工坊 / Workshop</b></td><td>Steam 的 mod 平台。mod 装在 <code>steamapps/workshop/content/294100/</code>。</td><td><code>source: 'workshop'</code></td></tr>
+  </tbody>
+</table>
+
+<div class="note">
+  <b>大小写陷阱（提前剧透）</b>
+  <p>RimWorld 比较 packageId 时<b>区分大小写</b>，但它自己内部用的是小写。如果 <code>ModsConfig.xml</code> 里写了 <code>Ludeon.RimWorld</code>，游戏会显示成一个灰色的重复项。所以这份代码里到处都是 <code>pid()</code> 函数（把字符串转小写），<code>m.key</code> 永远是 <code>pid(packageId)</code>。第 3 页会细讲。</p>
+</div>
+
+<h2>你需要准备什么</h2>
+
+<div class="grid2">
+  <div class="card">
+    <h4>必备</h4>
+    <p>一个能看代码的编辑器（VS Code / Cursor 都行）。强烈建议开着"跳转到定义"（F12），因为这个项目函数调用层级比较深。</p>
+  </div>
+  <div class="card">
+    <h4>可选</h4>
+    <p>Node.js 20+。想跑测试和脚本的话需要。只是读代码不需要。</p>
+  </div>
+</div>
+
+<p>准备好了就翻下一页。第一页有点长，但是一次性投资 —— 之后 6 页都不会再停下来解释语法。</p>
+
+<div class="pager">
+  <a href="01-js.html" class="nx"><span>下一页</span>1 · 给 Python 程序员的 JS 速通 →</a>
+</div>
+
+</main>
+</body>
+</html>

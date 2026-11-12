@@ -1,0 +1,23 @@
+node_modules/
+dist/
+.ref/
+*.log
+.npm-cache/
+.pnpm-store/
+.tmp-data/
+.tmp-home/
+.tmp-test-*/
+backups
+
+# Decompiled third-party mod assemblies (copyrighted, local analysis only)
+.audit_tmp/
+*.il
+
+# Secrets / local credentials
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+.npmrc
+settings.local.json

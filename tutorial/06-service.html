@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>6 · service.js · RimList 代码导读</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="side">
+  <div class="brand">
+    <b>RimList 代码导读</b>
+    <span>写给会一点 Python 的人</span>
+  </div>
+  <a href="index.html">0 · 先看这里</a>
+  <a href="01-js.html">1 · JS 速通</a>
+  <a href="02-entry.html">2 · 入口 index.js</a>
+  <a href="03-scan.html">3 · 扫描 mod</a>
+  <a href="04-sort.html">4 · 排序与诊断</a>
+  <a href="05-rules.html">5 · 规则库与列表</a>
+  <a href="06-service.html" class="on">6 · service.js</a>
+  <a href="07-client.html">7 · 前端 React</a>
+  <a href="08-hands-on.html">8 · 动手改与测试</a>
+  <div class="side-foot">
+    文件：<code>src/host/service.js</code>（1228 行）<br>
+    <b>最大的文件，但结构非常规整。</b>这一页只看它的骨架，不逐行读。
+  </div>
+</nav>
+
+<main>
+
+<div class="kicker">第 6 页 · 总调度</div>
+
+<h1>
+  service.js：把所有零件串起来
+  <span class="sub">1228 行，但结构极其规律：一个状态对象、一个序列化队列、一个 <code>methods</code> 大字典。看懂骨架，剩下就是查字典。</span>
+</h1>
+
+<div class="note">
+  <b>先给你一个"不用怕"的理由</b>
+  <p>这个文件虽然最长，但它是<b>全项目最容易读的</b>，因为它几乎是线性的：从前到后是"设置 → 扫描 → 视图 → 增删改 → 列表 → 备份 → 启动 → 日志 → 工具方法"。没有隐藏的抽象，没有复杂的控制流。</p>
+  <p>不要试图一次读完。<b>把它当字典：需要什么查什么。</b>这一页给你目录和使用方式。</p>
+</div>
+
+<h2>整体形状：一个工厂函数返回一个对象</h2>
+
+<div class="filename">src/host/service.js:48-60</div>
+<pre><code>export function createService({ dataDir, log = () =&gt; {}, fetchImpl }) {
+  initLogger(dataDir, true)
+  debugLog('service', 'createService called, dataDir:', dataDir)
+  
+  const rules = createRuleStore({ dataDir, log, fetchImpl })
+  const changelogs = createChangelogCache({ dataDir, fetchImpl: fetchImpl || globalThis.fetch, log })
+  const modBackups = createBackupStore({ dataDir })
+  const lists = createListStore({ dataDir })
+  const modTags = createTagStore({ ... })
+  const modNotes = createNoteStore({ ... })
+
+  const state = { ... }</code></pre>
+
+<p>没有任何 <code>class</code>。就是一个<b>大函数</b>，里面定义了一堆局部变量和函数，最后 <code>return</code> 一个对象暴露出去。这叫<b>工厂函数 + 闭包</b>。</p>
+
+<div class="tip">
+  <b>为什么不用 class？</b>
+  <p><code>class</code> 会把方法和数据分开（<code>this.xxx</code>），而这套写法里所有函数天然能访问 <code>state</code>、<code>rules</code>、<code>lists</code> —— 因为它们都在同一个作用域里。不用写 <code>this.</code>，也不用想"这个绑定对不对"。</p>
+  <p>Python 里最接近的是：把函数定义在一个工厂函数里，用闭包捕获变量，返回一个 dict 装起来。</p>
+  <pre><code>def create_service(data_dir):
+    state = {...}
+    def rescan():
+        state["mods"] = ...
+    def snapshot():
+        return {...}
+    return {"init": init, "dispatch": dispatch, "state": state}</code></pre>
+</div>
+
+<h2>状态对象：整个程序的"数据库"</h2>
+
+<div class="filename">src/host/service.js:60-71</div>
+<pre><code>const state = {
+  settings: { ...DEFAULT_SETTINGS },
+  discovered: null,
+  game: null,        <span class="c">// { full, major }</span>
+  catalog: new Map(),
+  mods: [],
+  duplicates: [],
+  scannedAt: null,
+  config: null,      <span class="c">// parsed ModsConfig { version, activeMods, knownExpansions }</span>
+  configMtime: 0,
+  ready: null,
+}</code></pre>
+
+<table>
+  <thead><tr><th>字段</th><th>是什么</th><th>谁来填</th></tr></thead>
+  <tbody>
+    <tr><td><code>settings</code></td><td>用户配置（路径、偏好、数据库来源…）</td><td><code>loadSettings()</code> 从 <code>settings.json</code> 读</td></tr>
+    <tr><td><code>game</code></td><td><code>{ full: "1.6.4871 rev598", major: "1.6" }</code></td><td><code>readGameVersion()</code></td></tr>
+    <tr><td><code>catalog</code></td><td><b>Map: key → mod</b>，核心索引</td><td><code>scanMods()</code></td></tr>
+    <tr><td><code>mods</code></td><td>同一个数组，但已排序（core → DLC → 名字）</td><td><code>scanMods()</code></td></tr>
+    <tr><td><code>config</code></td><td>从 <code>ModsConfig.xml</code> 解析出来的当前启用列表</td><td><code>loadConfig()</code></td></tr>
+    <tr><td><code>configMtime</code></td><td>文件的修改时间，用来判断要不要重读</td><td><code>loadConfig()</code></td></tr>
+    <tr><td><code>ready</code></td><td>初始化 Promise（只跑一次）</td><td><code>init()</code></td></tr>
+  </tbody>
+</table>
+
+<div class="warn">
+  <b><code>catalog</code> 和 <code>mods</code> 是同一批数据的两种视图</b>
+  <p><code>catalog</code> 是 Map（按 key 快速查），<code>mods</code> 是数组（按顺序遍历）。两者指向<b>同一批 mod 对象</b>，改一个字段两边都变。</p>
+  <p>所以你会看到代码里有时用 <code>state.catalog.get(k).name = ...</code> 改东西，然后 <code>state.mods</code> 里也生效了。这不是 bug，是有意的。</p>
+</div>
+
+<h2>最重要的 20 行：串行化队列</h2>
+
+<p>这个文件里最精妙的地方，只有 5 行：</p>
+
+<div class="filename">src/host/service.js:72-77</div>
+<pre><code>let queue = Promise.resolve()
+const serialize = (fn) =&gt; {
+  const p = queue.then(fn, fn)
+  queue = p.catch(() =&gt; {})
+  return p
+}</code></pre>
+
+<div class="note">
+  <b>它在解决什么问题</b>
+  <p>假设用户在界面上疯狂点"保存"，同时 AI 也触发了"排序并保存"。两次操作同时读写 <code>state.config</code> 和 <code>ModsConfig.xml</code>。<b>结果可能是写了一半 A 的结果、一半 B 的结果。</b></p>
+  <p>这三个类别的所有写操作都必须排队 —— 一次只跑一个。</p>
+</div>
+
+<h3>逐行拆解</h3>
+
+<div class="kv">
+  <div>
+    <span class="k"><code>let queue = Promise.resolve()</code></span>
+    <span class="v">起点是一个"已经完成"的 Promise。可以把它想成一个空的队列头。注意是 <code>let</code> 不是 <code>const</code> —— 它会被重新赋值。</span>
+  </div>
+  <div>
+    <span class="k"><code>queue.then(fn, fn)</code></span>
+    <span class="v"><b>成功和失败都调 <code>fn</code>。</b>意思是"不管上一个操作成功还是失败，都接着跑我这一个"。（如果只写 <code>queue.then(fn)</code>，上一个失败了，后面全部会跳过。）</span>
+  </div>
+  <div>
+    <span class="k"><code>queue = p.catch(() =&gt; {})</code></span>
+    <span class="v">队列尾更新成"这个操作的 Promise，但吞掉错误"。为什么吞？因为队列尾如果是个 rejected Promise，后面所有人都会收到 unhandled rejection 警告。<b>真正的错误已经通过 <code>return p</code> 交给调用者了，队列本身只需要知道"做完了"。</b></span>
+  </div>
+  <div>
+    <span class="k"><code>return p</code></span>
+    <span class="v">返回<b>原始</b>的 Promise（带着可能的错误），调用者能正常 <code>await</code> 和捕获。</span>
+  </div>
+</div>
+
+<p>用法：</p>
+
+<div class="filename">src/host/service.js:321-336（setActive 是串行化的）</div>
+<pre><code>const setActive = async (ids, { save = true } = {}) =&gt;
+  serialize(async () =&gt; {
+    await init()
+    const seen = new Set()
+    const next = []
+    for (const id of ids) {
+      const k = pid(id)
+      if (!k || seen.has(k)) continue
+      seen.add(k)
+      const m = state.catalog.get(k)
+      next.push(m ? m.packageId : id)
+    }
+    state.config = { ...state.config, activeMods: next }
+    if (save) await writeConfig()
+    return { active: next.map(pid) }
+  })</code></pre>
+
+<div class="tip">
+  <b>注意 <code>serialize</code> 包的是"整个写操作"</b>
+  <p>不是包 <code>writeConfig</code> 一行，而是包"校验 id → 去重 → 更新 state → 写文件"这一整段。因为<b>这几步必须原子完成</b> —— 中间插进另一个操作就乱了。</p>
+  <p>这是"临界区"的概念，和 Python 里 <code>with lock:</code> 包住一段代码完全一样。</p>
+</div>
+
+<h3>哪些方法被串行化了</h3>
+
+<p>不是所有方法都需要。搜索 <code>serialize</code> 能找到清单：</p>
+
+<table>
+  <thead><tr><th>被串行化</th><th>为什么</th></tr></thead>
+  <tbody>
+    <tr><td><code>setActive</code> / <code>activate</code> / <code>deactivate</code> / <code>move</code></td><td>都改 <code>state.config</code> + 写盘</td></tr>
+    <tr><td><code>sort</code></td><td>可能写盘</td></tr>
+    <tr><td><code>rescan</code></td><td>重建 catalog，同时别的操作在读</td></tr>
+    <tr><td><code>applyList</code> / <code>restoreBackup</code></td><td>整体替换 order + 写盘</td></tr>
+    <tr><td><code>gitInstall</code> / <code>gitUpdate</code> / <code>restoreModBackup</code> / <code>removeLocalMod</code></td><td>改磁盘上的 mod 文件夹</td></tr>
+    <tr><td><code>setSettings</code> / <code>configureDatabase</code></td><td>写 <code>settings.json</code></td></tr>
+  </tbody>
+</table>
+
+<p>反过来，<b>只读的方法不串行化</b>：<code>snapshot</code>、<code>search</code>、<code>diagnose</code>、<code>explain</code>、<code>rulesStatus</code>、<code>lists</code>…… 因为读操作互不干扰，而且排队会让界面变卡。</p>
+
+<h2><code>init()</code>：只跑一次的初始化</h2>
+
+<div class="filename">src/host/service.js:150-157</div>
+<pre><code>const init = () =&gt;
+  (state.ready ||= (async () =&gt; {
+    await mkdir(dataDir, { recursive: true })
+    await loadSettings()
+    await rescan()
+    <span class="c">// Rules load from cache immediately; network refresh in background.</span>
+    rules.ensure({ major: state.game?.major, maxAgeHours: state.settings.dbMaxAgeHours }).catch((e) =&gt; log('rules ensure failed: ' + e.message))
+  })())</code></pre>
+
+<p>这五行是整个文件的启动钥匙。<b>几乎每个 method 的第一行都是 <code>await init()</code>。</b></p>
+
+<div class="kv">
+  <div>
+    <span class="k"><code>||=</code></span>
+    <span class="v">"如果左边是假值（<code>null</code>），就执行右边并赋值"。所以第一次调用时创建 Promise 存进 <code>state.ready</code>，之后所有调用都直接返回同一个 Promise。<b>保证初始化只跑一次</b>。</span>
+  </div>
+  <div>
+    <span class="k">为什么这是并发安全的</span>
+    <span class="v">因为 JS 单线程。第一个调用者执行 <code>state.ready ||= ...</code> 时不会被别人打断。第二个调用进来时 <code>state.ready</code> 已经有值了。</span>
+  </div>
+  <div>
+    <span class="k">最后一行不 await</span>
+    <span class="v"><code>rules.ensure(...).catch(...)</code> 没有 await。<b>规则库下载可能要好几十秒</b>，不能让初始化卡在那。先用缓存跑起来，下载完了自然生效。</span>
+  </div>
+</div>
+
+<div class="filename">Python 等价物</div>
+<pre><code>_ready = None
+async def init():
+    global _ready
+    if _ready is None:
+        _ready = _do_init()      # 存一个 coroutine/future
+    return await _ready</code></pre>
+
+<h2>视图层：<code>modView</code></h2>
+
+<p>内部 mod 对象字段很多（30+ 个），而且有一堆不该给前端看的（比如 <code>path</code> 里的完整磁盘路径其实要给，但 <code>mtime</code> 就不用）。所以有一个"视图函数"把关：</p>
+
+<div class="filename">src/host/service.js:270-296</div>
+<pre><code>const modView = (m) =&gt; ({
+  key: m.key,
+  packageId: m.packageId,
+  name: m.name,
+  author: m.author,
+  kind: m.kind,
+  source: m.source,
+  path: m.path,
+  publishedFileId: m.publishedFileId,
+  steamAppId: m.steamAppId,
+  url: m.url,
+  supportedVersions: m.supportedVersions,
+  modVersion: m.modVersion,
+  hasPreview: !!m.preview,
+  invalid: m.invalid,
+  dependsOn: m.modDependencies.map((d) =&gt; ({ packageId: pid(d.packageId), name: d.displayName, url: d.steamWorkshopUrl || d.downloadUrl })),
+  loadAfter: m.loadAfter.map(pid),
+  loadBefore: m.loadBefore.map(pid),
+  forceLoadAfter: m.forceLoadAfter.map(pid),
+  forceLoadBefore: m.forceLoadBefore.map(pid),
+  incompatibleWith: m.incompatibleWith.map(pid),
+  nvw: rules.nvwCovers(m.key),
+  rules: rules.rulesFor(m.key),
+  replacement: rules.replacementFor({ publishedFileId: m.publishedFileId, packageId: m.key }) || null,
+  update: updateInfo(m),
+  tags: m.tags || null,
+})</code></pre>
+
+<p>注意几个转换：</p>
+
+<div class="kv">
+  <div><span class="k"><code>hasPreview: !!m.preview</code></span><span class="v">内部存的是文件路径，前端只需要"有没有"。<code>!!</code> 转成布尔值，也避免了把服务器路径暴露给浏览器。</span></div>
+  <div><span class="k"><code>.map(pid)</code></span><span class="v">所有规则里的 packageId 全部转小写，<b>和 catalog 的 key 一致</b>。前端拿到的就是能直接比较的形式。</span></div>
+  <div><span class="k"><code>dependsOn</code></span><span class="v">把内部的 <code>modDependencies</code>（对象数组）改名并简化成前端要的三字段。</span></div>
+  <div><span class="k">实时计算字段</span><span class="v"><code>nvw</code>、<code>rules</code>、<code>replacement</code>、<code>update</code> 都不是存在 mod 上的，而是<b>调用时现算</b>。所以规则库更新后不用重新扫描就能看到新规则。</span></div>
+</div>
+
+<div class="tip">
+  <b>这个"视图层"模式的三个好处</b>
+  <ol style="margin-bottom:0">
+    <li><b>接口稳定</b>：内部结构随便改，前端不受影响（改了视图函数就行）</li>
+    <li><b>省流量</b>：不把 <code>mtime</code>、<code>folder</code>、<code>loadFolderVersions</code> 这些没用的发给浏览器</li>
+    <li><b>安全性</b>：不想暴露的字段不出现在视图里</li>
+  </ol>
+</div>
+
+<h2><code>snapshot</code>：一次给前端所有东西</h2>
+
+<p>整个前端只有<b>一个</b>初始请求，就是它。</p>
+
+<div class="filename">src/host/service.js:299-318</div>
+<pre><code>const snapshot = async () =&gt; {
+  await init()
+  await loadConfig()
+  const active = activeKeys()
+  const diag = diagnose(active, state.catalog, rules, { gameMajor: state.game?.major, duplicates: state.duplicates })
+  return {
+    game: state.game,
+    paths: effectivePaths(),
+    discovered: state.discovered,
+    settings: state.settings,
+    dataDir,
+    scannedAt: state.scannedAt,
+    modsConfigPath: modsConfigPath(),
+    active,
+    mods: state.mods.map(modView),
+    diagnostics: diag,
+    lists: await lists.summaries(),
+    rules: await rules.status(),
+  }
+}</code></pre>
+
+<div class="note">
+  <b>注意 <code>loadConfig()</code> 每次都调</b>
+  <p>因为它内部有 mtime 检查：</p>
+  <pre><code>const s = await stat(f)
+if (s.mtimeMs === state.configMtime &amp;&amp; state.config) return
+state.config = parseModsConfig(await readFile(f, 'utf8'))</code></pre>
+  <p>（<code>service.js:145-147</code>）文件没变就立刻返回，变了才重读。<b>这样如果你在游戏里改了 mod 列表，DSH 界面刷新一下就能看到最新状态。</b>一个 <code>stat()</code> 调用换来了"永远同步"。</p>
+</div>
+
+<h2><code>methods</code> 字典：所有能力都在这</h2>
+
+<div class="filename">src/host/service.js:559-561</div>
+<pre><code><span class="c">// ---- dispatch for HTTP + tools ----</span>
+const methods = {
+  snapshot: () =&gt; snapshot(),
+  rescan: async () =&gt; {
+    await init()
+    return serialize(rescan)
+  },
+  setActive: ({ ids }) =&gt; setActive(ids),
+  ...</code></pre>
+
+<p>从第 560 行到 1180 行，600 多行都是这个对象。<b>它就是"这个插件能做的所有事"的清单。</b></p>
+
+<div class="filename">src/host/service.js:1182-1188</div>
+<pre><code>const dispatch = async (method, args = {}) =&gt; {
+  const fn = methods[method]
+  if (!fn) throw new Error('unknown method: ' + method)
+  return fn(args || {})
+}
+
+return { init, dispatch, state, rules, lists, activeKeys, effectivePaths }</code></pre>
+
+<p>八行。<code>dispatch</code> 就是<b>按名字查表调用</b>。没有 switch、没有 if 链。<b>加一个新方法 = 在 <code>methods</code> 里加一行。</b></p>
+
+<div class="tip">
+  <b>为什么 <code>args || {}</code></b>
+  <p>因为前端可能传 <code>null</code>（JSON 里 <code>undefined</code> 会被丢掉）。如果某个 method 的定义是 <code>async ({ ids }) =&gt; ...</code>，而 <code>args</code> 是 <code>null</code>，解构会崩：<code>Cannot destructure property 'ids' of null</code>。<b>这一层兜底让所有 method 都能安全地解构参数。</b></p>
+</div>
+
+<h3>方法分组（当目录用）</h3>
+
+<table>
+  <thead><tr><th>范围</th><th>方法</th><th>干什么</th></tr></thead>
+  <tbody>
+    <tr><td rowspan="3">读状态</td><td><code>snapshot</code></td><td>前端初始化全量拉一次</td></tr>
+    <tr><td><code>diagnose</code> / <code>explain</code></td><td>诊断 / 解释某 mod 为何在那个位置</td></tr>
+    <tr><td><code>mod</code> / <code>search</code></td><td>单个详情 / 搜索</td></tr>
+
+    <tr><td rowspan="3">改顺序</td><td><code>setActive</code></td><td>整体替换启用列表（保存）</td></tr>
+    <tr><td><code>activate</code> / <code>deactivate</code> / <code>move</code></td><td>单个增删移</td></tr>
+    <tr><td><code>sort</code> / <code>sortIds</code></td><td>排序并可选保存 / 只算草稿</td></tr>
+
+    <tr><td rowspan="3">规则</td><td><code>rulesStatus</code> / <code>refreshRules</code></td><td>规则库状态 / 重新下载</td></tr>
+    <tr><td><code>addRule</code> / <code>removeRule</code> / <code>pinOrder</code></td><td>自定义规则增删 / 固定当前顺序</td></tr>
+    <tr><td><code>configureDatabase</code> / <code>rimsortPaths</code></td><td>改数据库来源 / 探测 RimSort 安装</td></tr>
+
+    <tr><td rowspan="2">列表</td><td><code>lists</code> / <code>getList</code> / <code>saveList</code> / <code>deleteList</code></td><td>增删查</td></tr>
+    <tr><td><code>applyList</code> / <code>compareList</code> / <code>importText</code> / <code>importUrl</code> / <code>exportList</code> / <code>installMissing</code></td><td>应用 / 对比 / 导入导出 / 缺的装回来</td></tr>
+
+    <tr><td rowspan="3">版本与备份</td><td><code>modUpdates</code> / <code>modChangelog</code></td><td>最近更新 / 某个 mod 的更新日志</td></tr>
+    <tr><td><code>modBackups</code> / <code>backupMod</code> / <code>restoreModBackup</code> / <code>deleteModBackup</code> / <code>removeLocalMod</code></td><td>mod 文件夹快照（工坊不能回滚）</td></tr>
+    <tr><td><code>gitInstall</code> / <code>gitCheck</code> / <code>gitUpdate</code></td><td>从 GitHub 装 mod</td></tr>
+
+    <tr><td rowspan="3">分类标签</td><td><code>classify</code> / <code>classifyAll</code></td><td>猜 mod 类型（内容/框架/汉化）</td></tr>
+    <tr><td><code>tagIndex</code> / <code>tagReview</code> / <code>setTags</code> / <code>resetAllTags</code></td><td>标签的读和改</td></tr>
+    <tr><td><code>getNote</code> / <code>setNote</code> / <code>getAllNotes</code></td><td>给 mod 写备注</td></tr>
+
+    <tr><td rowspan="3">游戏</td><td><code>launch</code> / <code>launchPreview</code></td><td>启动游戏 / 预览命令</td></tr>
+    <tr><td><code>gameStatus</code> / <code>stopGame</code></td><td>在跑吗 / 停掉</td></tr>
+    <tr><td><code>logInfo</code> / <code>readLog</code> / <code>logSummary</code></td><td>Player.log 的查看与总结</td></tr>
+
+    <tr><td>设置</td><td><code>settings</code> / <code>setSettings</code> / <code>setModBackup</code> / <code>setUserRulesEnabled</code></td><td>读写配置</td></tr>
+    <tr><td>其它</td><td><code>previewPath</code> / <code>backups</code> / <code>restoreBackup</code> / <code>getDebugLog</code> / <code>clearDebugLog</code> / <code>subscribeMod</code> / <code>unsubscribeMod</code> / <code>openSteamPage</code></td><td>杂项</td></tr>
+  </tbody>
+</table>
+
+<h2>三个最有代表性的实现</h2>
+
+<h3>① 只算不存的 <code>sortIds</code></h3>
+
+<div class="filename">src/host/service.js:592-599</div>
+<pre><code>sortIds: async ({ ids, tieBreak }) =&gt; {
+  await init()
+  const keys = (Array.isArray(ids) ? ids : activeKeys()).map(pid)
+  const r = sortLoadOrder(keys, state.catalog, rules, { tieBreak: tieBreak ?? state.settings.sortTieBreak })
+  const before = diagnose(keys, state.catalog, rules, { gameMajor: state.game?.major }).counts
+  const after = diagnose(r.order, state.catalog, rules, { gameMajor: state.game?.major }).counts
+  return { order: r.order, moved: r.moved, broken: r.broken, crossTierViolations: r.crossTierViolations, before, after, saved: false }
+}</code></pre>
+
+<p>和 <code>sort</code>（带 <code>save=true</code> 会写盘）几乎一样，但不写盘。前端拿 <code>order</code> 存进"草稿"。</p>
+
+<div class="tip">
+  <b><code>before</code> / <code>after</code> 这个设计很贴心</b>
+  <p>排序前后各诊断一次，返回 <code>{ error, warning, info }</code> 数量。界面上就能显示"<code>3E/5W → 0E/2W</code>" —— 用户立刻知道<b>这次排序值不值得保存</b>。</p>
+  <p>如果不改好，用户就不会点保存，草稿一丢就回到原样。<b>这是个很好的交互决策。</b></p>
+</div>
+
+<h3>② 挂载点：<code>writeConfig</code></h3>
+
+<p>全项目只有这一处写 <code>ModsConfig.xml</code>：</p>
+
+<div class="filename">src/host/service.js:339-361</div>
+<pre><code>const BACKUP_DIR = 'backups'
+const writeConfig = async () =&gt; {
+  const f = modsConfigPath()
+  if (!f) throw new Error('RimWorld config directory not found; set configDir in settings')
+  const cfg = state.config
+  const exp = new Set(cfg.knownExpansions.map(pid))
+  for (const k of cfg.activeMods.map(pid)) if (/^ludeon\.rimworld\./.test(k)) exp.add(k)
+  const seen = new Set()
+  const ids = cfg.activeMods.map(pid).filter((k) =&gt; k &amp;&amp; !seen.has(k) &amp;&amp; seen.add(k))
+  const xml = buildModsConfig({ version: cfg.version || state.game?.full || '', activeMods: ids, knownExpansions: [...exp] })
+  <span class="c">// Backup first.</span>
+  const bdir = path.join(dataDir, BACKUP_DIR)
+  await mkdir(bdir, { recursive: true })
+  if (await exists(f)) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+    await copyFile(f, path.join(bdir, `ModsConfig.${stamp}.xml`))
+    await pruneBackups(bdir)
+  }
+  await writeFile(f + '.tmp', xml, 'utf8')
+  await rename(f + '.tmp', f)
+  state.configMtime = (await stat(f)).mtimeMs
+}</code></pre>
+
+<p>这个函数有五个值得学的点：</p>
+
+<ol class="steps">
+  <li><b>自动补齐 knownExpansions</b><br>所有 <code>ludeon.rimworld.*</code> 的 mod 自动加进"已知资料片"列表。免得因为忘了写导致游戏提示"你需要 DLC"。</li>
+  <li><b>小写 + 去重</b><br>那个反复出现的 <code>filter((k) =&gt; k &amp;&amp; !seen.has(k) &amp;&amp; seen.add(k))</code> 模式。</li>
+  <li><b>先备份再写</b><br>用万无一失的顺序：<code>copyFile</code> 备份 → 写 <code>.tmp</code> → <code>rename</code>。</li>
+  <li><b>备份文件名用 ISO 时间戳</b><br><code>new Date().toISOString().replace(/[:.]/g, '-')</code> —— Windows 文件名不能有冒号，所以把 <code>:</code> 和 <code>.</code> 换成 <code>-</code>。</li>
+  <li><b>写完更新 <code>configMtime</code></b><br>否则下次 <code>loadConfig()</code> 会以为文件被外部改了，白白重读一遍（而且可能读到刚写的自己的内容，无谓开销）。</li>
+</ol>
+
+<div class="note">
+  <b>备份修剪策略</b>
+  <p><code>pruneBackups</code> 只保留最新的 <code>settings.backupKeep</code> 个（默认 20）。因为文件名里有 ISO 时间戳，<b>按文件名排序就等于按时间排序</b>，所以 <code>.sort()</code> 之后砍掉前面（最老的）即可。不需要解析时间。</p>
+  <p>这是个很实用的技巧：合理设计文件名，省掉后续所有时间解析。</p>
+</div>
+
+<h3>③ 跨模块协作：<code>applyList</code></h3>
+
+<p>看一个同时用到 lists、catalog、config 的复合操作：</p>
+
+<div class="filename">src/host/service.js:476-492</div>
+<pre><code>const applyList = async (id, { mode = 'replace' } = {}) =&gt;
+  serialize(async () =&gt; {
+    await init()
+    const l = await lists.get(id)
+    if (!l) throw new Error('list not found: ' + id)
+    const ids = l.mods.map((m) =&gt; m.packageId)
+    const missing = ids.filter((x) =&gt; !state.catalog.has(pid(x)))
+    let next = ids
+    if (mode === 'merge') {
+      const cur = state.config.activeMods
+      const set = new Set(cur.map(pid))
+      next = [...cur, ...ids.filter((x) =&gt; !set.has(pid(x)))]
+    }
+    state.config = { ...state.config, activeMods: next.filter((x) =&gt; state.catalog.has(pid(x))) }
+    await writeConfig()
+    return { active: activeKeys(), missing: missing.map((x) =&gt; ({ packageId: x, ...(l.mods.find((m) =&gt; m.packageId === x) || {}) })) }
+  })</code></pre>
+
+<div class="kv">
+  <div><span class="k">两种模式</span><span class="v"><code>replace</code> 直接换掉整个列表；<code>merge</code> 把列表里我还没有的追加到当前列表后面。</span></div>
+  <div><span class="k">先算 missing</span><span class="v">在过滤之前就算出来，这样能告诉用户"这个列表里有 5 个 mod 你没装"。</span></div>
+  <div><span class="k"><b>写盘时过滤未安装的</b></span><span class="v"><code>next.filter((x) =&gt; state.catalog.has(pid(x)))</code> —— 没装的 mod 不能写进 ModsConfig，否则游戏会报错或忽略。<b>但 missing 里仍然报告它们</b>，让用户知道缺了什么。</span></div>
+  <div><span class="k">返回体带完整信息</span><span class="v"><code>{ packageId, ...(l.mods.find(...) || {}) }</code> —— 把列表里记录的完整 mod 信息（名字、工坊 ID）也带上，前端能直接显示"缺：某某 Mod"而不是光秃秃的 packageId。</span></div>
+</div>
+
+<h2>一处值得警惕的代码</h2>
+
+<p>不是所有代码都漂亮。看 <code>classifyOne</code>：</p>
+
+<div class="filename">src/host/service.js:234-259</div>
+<pre><code>const classifyOne = async (packageId, { force = false, ai = null } = {}) =&gt; {
+  await init()
+  const m = state.catalog.get(pid(packageId))
+  if (!m) return null
+  const key = m.key
+  if (ai) {
+    const result = finalize({ ...ai, mod_name: m.name, ... })
+    await modTags.setAi(key, result)
+    m.tags = result
+    return result
+  }
+  const version = versionOf(m)
+  const saved = !force ? await modTags.getAuto(key, version) : null
+  const result = saved?.result || classifyMod(m, await inspectModFolder(m.path, state.game?.major), {
+    dependents: state.mods.reduce((n, x) =&gt; n + (x.modDependencies || []).filter((d) =&gt; pid(d.packageId) === key).length, 0),
+  })
+  if (!saved) {
+    const f = await inspectModFolder(m.path, state.game?.major)
+    const automatic = classifyMod(m, f, { dependents: state.mods.reduce((n, x) =&gt; n + (x.modDependencies || []).filter((d) =&gt; pid(d.packageId) === key).length, 0) })
+    await modTags.setAuto(key, version, automatic, signalsSummary(f))
+    m.tags = automatic
+  } else m.tags = saved.result
+  const override = await modTags.getAi(key)
+  if (override) m.tags = override
+  return m.tags
+}</code></pre>
+
+<div class="warn">
+  <b>这里有两个明显的问题</b>
+  <ol style="margin-bottom:0">
+    <li><b><code>inspectModFolder</code> 被调了两次</b>（第 247 行和第 251 行），<code>classifyMod</code> 也被调了两次，<code>dependents</code> 那串 <code>reduce</code> 写了三遍。磁盘 IO 白白做了一倍 —— 对一个要扫描几百个 mod 的操作来说，这是实打实的浪费。</li>
+    <li><code>result</code> 变量算出来了，但在 <code>!saved</code> 分支里又重新算了一遍 <code>automatic</code>，<code>result</code> 就白算了。</li>
+  </ol>
+  <p><b>这很可能是重构过程中的残留</b>（先写了 <code>saved</code> 分支，后来加缓存时没清理干净）。</p>
+</div>
+
+<div class="tip">
+  <b>这是个很好的练习素材</b>
+  <p>如果你想知道自己有没有真的读懂，试着把这段重写成：<b>只调一次 <code>inspectModFolder</code>，只算一次 <code>dependents</code></b>。第 8 页会给出一个参考改法。</p>
+  <p>顺便说：<b>读代码时发现这种地方是好事</b> —— 说明这段确实被读懂了，不是"看起来能跑就跳过"。</p>
+</div>
+
+<h2>service.js 的目录结构</h2>
+
+<div class="tree">service.js
+├─ 1-20      import（13 个本地模块，可见它是总汇合点）
+├─ 22-46     DEFAULT_SETTINGS（所有默认配置，注释写得很全）
+├─ 48-58     createService 开始：建 6 个子 store
+├─ 60-71     state 对象
+├─ 72-77     serialize 串行化队列          ★
+├─ 79-121    设置：loadSettings / saveSettings / effectivePaths / modsConfigPath
+├─ 123-148   扫描：rescan / loadConfig
+├─ 150-157   init（只跑一次）              ★
+├─ 159-232   版本追踪 / 自动备份 / updateInfo
+├─ 234-267   分类：classifyOne / classifyAll
+├─ 269-296   视图：modView                 ★
+├─ 297-318   snapshot                      ★
+├─ 320-389   改顺序：setActive / writeConfig / pruneBackups / listBackups / restoreBackup
+├─ 391-419   sort / explain
+├─ 421-557   列表：originOf / saveList / applyList / importText / importUrl / exportList / compareList
+├─ 559-1180  methods 大字典                ★（占一半篇幅）
+└─ 1182-1188 dispatch + return              ★</div>
+
+<p><b>带 ★ 的是核心，加起来不到 150 行。</b>其余都是具体业务的填充。</p>
+
+<h2>读这个文件的正确姿势</h2>
+
+<ol class="steps">
+  <li>
+    <b>先读 48-157 行（到 <code>init</code> 结束）</b><br>
+    理解 state、serialize、init。这三样是全文件的地基。
+  </li>
+  <li>
+    <b>再读 1182-1188（dispatch）</b><br>
+    知道入口长什么样，心里就有数：剩下的 600 行都是"可以被 dispatch 调到的方法"。
+  </li>
+  <li>
+    <b>然后按需查 <code>methods</code></b><br>
+    想知道"排序怎么走的"就查 <code>sortIds</code>；想知道"保存怎么写的"就查 <code>setActive</code> → <code>writeConfig</code>。
+  </li>
+  <li>
+    <b>跳过你暂时不关心的部分</b><br>
+    git、日志解析、分类算法 —— 这些是独立功能，不影响理解主干。想用再回来看。
+  </li>
+</ol>
+
+<div class="note">
+  <b>顺便：怎么快速定位一个方法</b>
+  <p>在 VS Code 里按 <kbd>Ctrl+Shift+O</kbd>（大纲）能列出文件里所有符号。<code>service.js</code> 里会有几十个 <code>xxx: async (...)</code> —— 跳转很快。</p>
+  <p>命令行也行：<code>grep -n "^    [a-zA-Z]*: async" src/host/service.js</code> 就能列出所有 method 的行号。</p>
+</div>
+
+<div class="pager">
+  <a href="05-rules.html"><span>上一页</span>← 5 · 规则库与列表</a>
+  <a href="07-client.html" class="nx"><span>下一页</span>7 · 前端 React →</a>
+</div>
+
+</main>
+</body>
+</html>

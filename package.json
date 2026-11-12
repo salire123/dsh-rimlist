@@ -1,0 +1,66 @@
+{
+  "name": "dsh-rimlist",
+  "version": "0.1.0",
+  "description": "RimWorld mod manager inside DeepSeek Harness: scan mods, sort with community rules, diagnose problems, share mod lists with other players, plus rimlist_* AI tools.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "src/host",
+    "skills",
+    "lib/client.js",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node build.mjs",
+    "build:dev": "node build.mjs --no-minify",
+    "test": "node --test \"test/**/*.test.js\"",
+    "scan": "node scripts/scan.mjs"
+  },
+  "dependencies": {
+    "fast-xml-parser": "^5.2.5"
+  },
+  "peerDependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "license": "GPL-3.0-or-later",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "rimworld",
+    "mod-manager",
+    "rimsort"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-session"
+      ]
+    }
+  },
+  "allowScripts": {
+    "esbuild@0.25.12": true
+  }
+}

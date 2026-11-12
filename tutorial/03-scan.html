@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3 · 扫描 mod · RimList 代码导读</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="side">
+  <div class="brand">
+    <b>RimList 代码导读</b>
+    <span>写给会一点 Python 的人</span>
+  </div>
+  <a href="index.html">0 · 先看这里</a>
+  <a href="01-js.html">1 · JS 速通</a>
+  <a href="02-entry.html">2 · 入口 index.js</a>
+  <a href="03-scan.html" class="on">3 · 扫描 mod</a>
+  <a href="04-sort.html">4 · 排序与诊断</a>
+  <a href="05-rules.html">5 · 规则库与列表</a>
+  <a href="06-service.html">6 · service.js</a>
+  <a href="07-client.html">7 · 前端 React</a>
+  <a href="08-hands-on.html">8 · 动手改与测试</a>
+  <div class="side-foot">
+    文件：<code>src/host/paths.js</code>（147 行）<br>
+    <code>src/host/scan.js</code>（148 行）<br>
+    <code>src/host/xml.js</code>（131 行）<br>
+    三个文件加起来不到 430 行，是后端最好读的一部分。
+  </div>
+</nav>
+
+<main>
+
+<div class="kicker">第 3 页 · 数据来源</div>
+
+<h1>
+  从磁盘到内存：扫描
+  <span class="sub">排序算法再聪明，也得先知道电脑上有哪些 mod。这一页看数据是怎么进来的。</span>
+</h1>
+
+<div class="flow">① paths.js      找到 RimWorld 装在哪 + mod 都放在哪些文件夹
+        │
+        │  { gameDir, configDir, workshopDir, localModsDir }
+        ▼
+② scan.js       遍历这些文件夹，每个 mod 读一次 About.xml
+        │
+        │  调用 xml.js 的 parseAbout()
+        ▼
+③ xml.js        把 XML 文本变成 JS 对象
+        │
+        ▼
+   { mods: [...], byId: Map, duplicates: [...] }   ← 交给 service 存进 state
+        │
+        ▼
+   state.catalog（Map: key → mod）   ← 后面排序、诊断全都吃这个</div>
+
+<h2>① 找路径：一份很实在的"跨平台兼容"代码</h2>
+
+<p>RimWorld 在三个平台上的安装位置完全不同，而且 Steam 库可能在任意磁盘上。这段代码就是在解决这件事。</p>
+
+<div class="filename">src/host/paths.js:21-56</div>
+<pre><code>async function steamLibraryRoots() {
+  const roots = new Set()
+  const bases = platform() === 'win32'
+    ? [
+        process.env['ProgramFiles(x86)'] &amp;&amp; path.join(process.env['ProgramFiles(x86)'], 'Steam'),
+        process.env.ProgramFiles &amp;&amp; path.join(process.env.ProgramFiles, 'Steam'),
+        'C:\\Program Files (x86)\\Steam',
+        'C:\\Program Files\\Steam',
+        'D:\\Steam',
+        'D:\\SteamLibrary',
+      ].filter(Boolean)
+    : platform() === 'darwin'
+      ? [path.join(H, 'Library/Application Support/Steam')]
+      : [ ...几个 Linux 常见位置... ]
+  for (const base of bases) if (await exists(path.join(base, 'steamapps'))) roots.add(base)
+
+  <span class="c">// libraryfolders.vdf lists extra library locations.</span>
+  for (const base of [...roots]) {
+    const vdf = path.join(base, 'steamapps', 'libraryfolders.vdf')
+    if (!(await exists(vdf))) continue
+    try {
+      const text = await readFile(vdf, 'utf8')
+      for (const m of text.matchAll(/"path"\s+"([^"]+)"/g)) {
+        const p = m[1].replace(/\\\\/g, '\\')
+        if (await exists(path.join(p, 'steamapps'))) roots.add(p)
+      }
+    } catch {}
+  }
+  return [...roots]
+}</code></pre>
+
+<p>要点：</p>
+
+<div class="kv">
+  <div><span class="k">嵌套三元</span><span class="v"><code>a ? ... : b ? ... : c</code> 就是 Python 的 <code>x if a else y if b else z</code>，但缩进表达力更强，这里用了换行对齐来看。</span></div>
+  <div><span class="k"><code>process.env.X &amp;&amp; path.join(...)</code></span><span class="v">如果环境变量不存在就是 <code>undefined</code>，后面的 <code>.filter(Boolean)</code> 会把它去掉。这是"可选候选路径"的惯用法。</span></div>
+  <div><span class="k"><code>new Set()</code> 去重</span><span class="v">同一个 Steam 目录可能从多个途径发现，用 Set 保证不重复。</span></div>
+  <div><span class="k"><code>for (const base of [...roots])</code></span><span class="v"><b>注意这个 <code>[...roots]</code>。</b>因为循环体内会往 <code>roots</code> 里 <code>add</code>。先复制一份快照来遍历，避免"遍历中修改集合"。Python 里你会写 <code>for base in list(roots):</code>。</span></div>
+</div>
+
+<div class="note">
+  <b>为什么解析 VDF 用正则而不用解析器</b>
+  <p>Steam 的 <code>libraryfolders.vdf</code> 是一种自定义格式，只有一处需要读（每个库的 <code>path</code> 字段）。为正则能搞定的事加一个依赖不划算。注释也说明了在干什么。这是很务实的取舍。</p>
+</div>
+
+<h3>主函数：按顺序找候选</h3>
+
+<div class="filename">src/host/paths.js:62-101</div>
+<pre><code>export async function discoverPaths() {
+  const out = { gameDir: null, configDir: null, workshopDir: null, localModsDir: null, steamRoots: [] }
+  const roots = await steamLibraryRoots()
+  out.steamRoots = roots
+  for (const root of roots) {
+    const game = path.join(root, 'steamapps', 'common', 'RimWorld')
+    if (!out.gameDir &amp;&amp; (await exists(path.join(game, 'Data')))) out.gameDir = game
+    const ws = path.join(root, 'steamapps', 'workshop', 'content', '294100')
+    if (!out.workshopDir &amp;&amp; (await exists(ws))) out.workshopDir = ws
+  }
+  ...
+  if (out.gameDir) out.localModsDir = path.join(out.gameDir, 'Mods')
+
+  const cfgCandidates = platform() === 'win32'
+    ? [ path.join(process.env.USERPROFILE || H, 'AppData', 'LocalLow', 'Ludeon Studios', 'RimWorld by Ludeon Studios', 'Config'), ... ]
+    : ...
+  for (const c of cfgCandidates) {
+    if (await exists(c)) {
+      out.configDir = path.normalize(c)
+      break
+    }
+  }
+  return out
+}</code></pre>
+
+<table>
+  <thead><tr><th>路径</th><th>是什么</th><th>里面有什么</th></tr></thead>
+  <tbody>
+    <tr><td><code>gameDir</code></td><td>游戏本体</td><td><code>Data/</code>（Core + DLC）、<code>Mods/</code>（本地 mod）、<code>Version.txt</code></td></tr>
+    <tr><td><code>workshopDir</code></td><td>创意工坊 mod</td><td><code>.../content/294100/&lt;数字ID&gt;/</code>。<b>294100 是 RimWorld 的 Steam AppID</b></td></tr>
+    <tr><td><code>localModsDir</code></td><td>手动装的 mod</td><td>游戏目录下的 <code>Mods/</code></td></tr>
+    <tr><td><code>configDir</code></td><td>存档和设置</td><td><b><code>ModsConfig.xml</code> 就在这里！</b></td></tr>
+  </tbody>
+</table>
+
+<div class="tip">
+  <b><code>Version.txt</code> 怎么变成 "1.6"</b>
+  <p>文件内容长这样：<code>1.6.4871 rev598</code>。所以需要一个提取函数：</p>
+  <pre><code>export function majorVersion(v) {
+  const m = String(v || '').match(/(\d+)\.(\d+)/)
+  return m ? m[1] + '.' + m[2] : null
+}</code></pre>
+  <p>（<code>paths.js:117</code>）<code>.match()</code> 返回数组 <code>['1.6', '1', '6']</code>（第 0 项是整个匹配），或者 <code>null</code>。Python: <code>re.search(r'(\d+)\.(\d+)', v)</code>。</p>
+  <p><b>为什么这个很重要</b>：后面判断"这个 mod 支不支持当前版本"全靠这个 <code>"1.6"</code> 字符串。</p>
+</div>
+
+<h2>② 扫描：把文件夹变成对象</h2>
+
+<div class="filename">src/host/scan.js:111-146</div>
+<pre><code>export async function scanMods({ gameDir, localModsDir, workshopDir, major, extraDirs = [] }) {
+  const found = []
+  const push = async (base, source) =&gt; {
+    if (!base || !(await exists(base))) return
+    const names = await listDirs(base)
+    await Promise.all(
+      names.map(async (name) =&gt; {
+        const m = await scanOne(path.join(base, name), source, major, name)
+        if (m) found.push(m)
+      }),
+    )
+  }
+  if (gameDir) await push(path.join(gameDir, 'Data'), 'official')
+  await push(localModsDir, 'local')
+  for (const d of extraDirs) await push(d, 'local')
+  await push(workshopDir, 'workshop')
+
+  <span class="c">// Resolve duplicates: official &gt; local &gt; workshop (game's own precedence).</span>
+  const rank = { official: 0, local: 1, workshop: 2 }
+  found.sort((a, b) =&gt; rank[a.source] - rank[b.source] || a.name.localeCompare(b.name))
+  const byId = new Map()
+  const duplicates = new Map()
+  for (const m of found) {
+    if (!byId.has(m.key)) byId.set(m.key, m)
+    else {
+      const d = duplicates.get(m.key) || [byId.get(m.key).path]
+      d.push(m.path)
+      duplicates.set(m.key, d)
+    }
+  }
+  ...
+  return { mods, byId, duplicates: [...duplicates.entries()].map(([key, paths]) =&gt; ({ key, paths })) }
+}</code></pre>
+
+<p>这段代码做了四件事，顺序很重要：</p>
+
+<ol class="steps">
+  <li>
+    <b>按来源依次扫描</b><br>
+    <code>Data/</code>（官方）→ <code>Mods/</code>（本地）→ 额外的本地目录 → 工坊。<code>push</code> 是个内部小函数，把"扫一个目录"这件事参数化。这个叫<b>闭包 + 高阶函数</b>：<code>push</code> 捕获了外层的 <code>found</code> 数组。
+  </li>
+  <li>
+    <b>并发扫每个子文件夹</b><br>
+    <code>Promise.all(names.map(async ...))</code>：几百个文件夹同时读，比一个个来快好几倍。
+  </li>
+  <li>
+    <b>排序决定优先级</b><br>
+    <code>rank[a.source] - rank[b.source]</code>：official(0) 排前面，workshop(2) 排后面。注释说明了原因：<b>这是游戏自己的优先级</b> —— 如果本地有一个同名 mod 也有工坊版本，游戏用本地的。
+  </li>
+  <li>
+    <b>建 Map，顺手记下重复</b><br>
+    <code>if (!byId.has(m.key))</code> 第一名的赢。后面的记进 <code>duplicates</code>（诊断时报告"这个 mod 装了两份"）。
+  </li>
+</ol>
+
+<div class="note">
+  <b><code>found.sort(...)</code> 里的 <code>||</code> 又是一个多级排序</b>
+  <p>先按来源优先级排，来源相同时按名字排（<code>localeCompare</code> 是本地化的字符串比较，中文能正确排）。这是这个项目的招牌写法，第 1 页提过一次。</p>
+</div>
+
+<h3>单个 mod 的扫描：一堆"试探"</h3>
+
+<p>RimWorld 的文件名大小写不统一（尤其是在 Linux 上），所以代码要挨个试：</p>
+
+<div class="filename">src/host/scan.js:27-52</div>
+<pre><code>async function readAboutIn(dir) {
+  <span class="c">// About.xml may be About/About.xml with varying case on case-sensitive FS.</span>
+  for (const rel of ['About/About.xml', 'about/about.xml', 'About/about.xml', 'about/About.xml']) {
+    const p = path.join(dir, rel)
+    if (await exists(p)) return { path: p, xml: await readFile(p, 'utf8') }
+  }
+  return null
+}
+
+async function readPublishedId(dir) {
+  for (const rel of ['About/PublishedFileId.txt', 'about/PublishedFileId.txt']) {
+    const p = path.join(dir, rel)
+    if (await exists(p)) {
+      const t = (await readFile(p, 'utf8')).trim()
+      if (/^\d+$/.test(t)) return t
+    }
+  }
+  return null
+}</code></pre>
+
+<p>Windows 上文件系统不区分大小写，这些循环第一次就命中。Linux 上就真的一一试探 —— 这样代码在两个平台都对。</p>
+
+<h3>组装 mod 对象</h3>
+
+<div class="filename">src/host/scan.js:82-103</div>
+<pre><code>const key = pid(meta.packageId) || pid(folderName)
+const isCore = key === CORE_ID
+const isExpansion = key in KNOWN_EXPANSIONS || (source === 'official' &amp;&amp; !isCore)
+const supported = meta.supportedVersions.length ? meta.supportedVersions
+  : meta.targetVersion ? [meta.targetVersion.match(/\d+\.\d+/)?.[0]].filter(Boolean) : []
+return {
+  ...meta,
+  key,
+  packageId: meta.packageId || folderName,
+  name: (source === 'official' &amp;&amp; OFFICIAL_NAMES[key]) || meta.name || folderName,
+  author: meta.author || (source === 'official' ? 'Ludeon Studios' : ''),
+  source,                               <span class="c">// official | local | workshop</span>
+  kind: isCore ? 'core' : isExpansion ? 'expansion' : 'mod',
+  path: dir,
+  folder: folderName,
+  publishedFileId,
+  steamAppId: meta.steamAppId || (KNOWN_EXPANSIONS[key] ? String(KNOWN_EXPANSIONS[key]) : null),
+  preview: await findPreview(dir),
+  supportedVersions: isCore &amp;&amp; !supported.length &amp;&amp; major ? [major] : supported,
+  loadFolderVersions,
+  mtime,
+  invalid: meta.packageId ? null : 'Missing &lt;packageId&gt;',
+}</code></pre>
+
+<p>这个对象就是<b>整个项目里最重要的数据结构</b>。后面排序、诊断、界面显示全都用它。逐字段看：</p>
+
+<table>
+  <thead><tr><th>字段</th><th>含义</th><th>示例</th></tr></thead>
+  <tbody>
+    <tr><td><code>key</code></td><td><b>主键，永远小写</b>。所有 Map 用它做 key</td><td><code>'brrainz.harmony'</code></td></tr>
+    <tr><td><code>packageId</code></td><td>原样大小写，用于显示和写文件</td><td><code>'brrainz.harmony'</code></td></tr>
+    <tr><td><code>name</code></td><td>显示名</td><td><code>'Harmony'</code></td></tr>
+    <tr><td><code>source</code></td><td>从哪来的</td><td><code>'official'</code> / <code>'local'</code> / <code>'workshop'</code></td></tr>
+    <tr><td><code>kind</code></td><td>是本体/资料片/普通 mod</td><td><code>'core'</code> / <code>'expansion'</code> / <code>'mod'</code></td></tr>
+    <tr><td><code>supportedVersions</code></td><td>声明支持哪些游戏版本</td><td><code>['1.5','1.6']</code></td></tr>
+    <tr><td><code>loadAfter</code> / <code>loadBefore</code></td><td>普通加载顺序要求</td><td><code>['brrainz.harmony']</code></td></tr>
+    <tr><td><code>forceLoadAfter</code> / <code>forceLoadBefore</code></td><td><b>强制</b>要求，优先级最高</td><td><code>[]</code></td></tr>
+    <tr><td><code>incompatibleWith</code></td><td>不能同时启用</td><td><code>['some.mod']</code></td></tr>
+    <tr><td><code>modDependencies</code></td><td>依赖的其它 mod（对象数组，带名字和链接）</td><td><code>[{ packageId, displayName, steamWorkshopUrl }]</code></td></tr>
+    <tr><td><code>invalid</code></td><td>解析失败时的错误信息，正常是 null</td><td><code>null</code></td></tr>
+  </tbody>
+</table>
+
+<div class="warn">
+  <b><code>key</code> vs <code>packageId</code> —— 这个区别要记牢</b>
+  <p><code>key = pid(meta.packageId)</code>，永远小写；<code>packageId</code> 保留原样。为什么需要两个？</p>
+  <ul>
+    <li><b>比较时用 key</b>：RimWorld 自己就区分大小写，所以 <code>Ludeon.RimWorld</code> 和 <code>ludeon.rimworld</code> 是两个不同的东西，写进 ModsConfig 会导致游戏显示灰化的重复项。</li>
+    <li><b>显示和写文件时用 packageId</b>：保留作者写的原样。</li>
+  </ul>
+  <p>整份代码里凡是 <code>.get(x)</code>、<code>.has(x)</code>、<code>Set</code> 操作，都用 key。所以在入口处就统一 <code>pid()</code> 一下。</p>
+</div>
+
+<div class="tip">
+  <b>这段代码里有个 <code>in</code> 操作符</b>
+  <p><code>key in KNOWN_EXPANSIONS</code> —— 检查对象的<b>键</b>是否存在。Python 是 <code>key in dict</code>，完全一样。注意别和 <code>of</code> 搞混：<code>in</code> 用于对象查键 / 数组查索引，<code>of</code> 用于遍历值。</p>
+</div>
+
+<h2>③ 解析 XML：这个项目唯一的外部依赖</h2>
+
+<p>打开 <code>package.json</code>，<code>dependencies</code> 里只有一项：</p>
+
+<div class="filename">package.json:27-29</div>
+<pre><code>"dependencies": {
+  "fast-xml-parser": "^5.2.5"
+}</code></pre>
+
+<p>整个后端就靠这一个库做 XML。用得很克制，配置也很直白：</p>
+
+<div class="filename">src/host/xml.js:10-20</div>
+<pre><code>const parser = new XMLParser({
+  ignoreAttributes: false,
+  attributeNamePrefix: '@_',
+  trimValues: true,
+  parseTagValue: false,
+  isArray: (name) =&gt; name === 'li',
+})
+
+const asArray = (v) =&gt; (v === undefined || v === null ? [] : Array.isArray(v) ? v : [v])
+const liList = (node) =&gt; asArray(node &amp;&amp; node.li)
+  .map((x) =&gt; (typeof x === 'object' ? x['#text'] ?? x : x))
+  .map((x) =&gt; String(x ?? '').trim())
+  .filter(Boolean)
+const text = (v) =&gt; (v === undefined || v === null ? '' : typeof v === 'object' ? String(v['#text'] ?? '') : String(v)).trim()</code></pre>
+
+<table>
+  <thead><tr><th>配置</th><th>为什么</th></tr></thead>
+  <tbody>
+    <tr><td><code>isArray: name =&gt; name === 'li'</code></td><td>RimWorld 的 XML 里列表项都是 <code>&lt;li&gt;...</code>。强制 <code>li</code> 总是数组 —— 否则只有一项时会被解析成单个值而不是数组，后面代码到处要判断</td></tr>
+    <tr><td><code>parseTagValue: false</code></td><td>不要自动把 <code>"1.6"</code> 转成数字 1.6。<b>packageId 和版本号都是字符串，转成数字就毁了</b></td></tr>
+    <tr><td><code>trimValues: true</code></td><td>自动去首尾空白</td></tr>
+  </tbody>
+</table>
+
+<h3>About.xml 长什么样</h3>
+
+<div class="filename">一个典型的 About.xml</div>
+<pre><code>&lt;?xml version="1.0" encoding="utf-8"?&gt;
+&lt;ModMetaData&gt;
+  &lt;packageId&gt;brrainz.harmony&lt;/packageId&gt;
+  &lt;name&gt;Harmony&lt;/name&gt;
+  &lt;authors&gt;
+    &lt;li&gt;Andreas Pardeike&lt;/li&gt;
+  &lt;/authors&gt;
+  &lt;supportedVersions&gt;
+    &lt;li&gt;1.5&lt;/li&gt;
+    &lt;li&gt;1.6&lt;/li&gt;
+  &lt;/supportedVersions&gt;
+  &lt;description&gt;A library for patching...&lt;/description&gt;
+  &lt;loadBefore&gt;
+    &lt;li&gt;ludeon.rimworld&lt;/li&gt;
+  &lt;/loadBefore&gt;
+&lt;/ModMetaData&gt;</code></pre>
+
+<p>解析后变成的 JS 对象：</p>
+
+<pre><code>{
+  ModMetaData: {
+    packageId: 'brrainz.harmony',
+    name: 'Harmony',
+    authors: { li: ['Andreas Pardeike'] },
+    supportedVersions: { li: ['1.5', '1.6'] },
+    description: 'A library for patching...',
+    loadBefore: { li: ['ludeon.rimworld'] },
+  }
+}</code></pre>
+
+<div class="note">
+  <b>为什么每个列表都是 <code>{ li: [...] }</code> 套一层</b>
+  <p>因为 XML 里是 <code>&lt;supportedVersions&gt;&lt;li&gt;1.5&lt;/li&gt;&lt;/supportedVersions&gt;</code> —— 标签名 <code>supportedVersions</code> 对应一个对象，里面有个 <code>li</code> 字段。所以取列表要写 <code>m.supportedVersions.li</code>。这就是 <code>liList()</code> 存在的理由：把这个啰嗦的"拆包"动作收敛到一个函数里。</p>
+</div>
+
+<h3>解析主函数</h3>
+
+<div class="filename">src/host/xml.js:49-74</div>
+<pre><code>export function parseAbout(xml, major) {
+  const doc = parser.parse(xml)
+  const m = doc.ModMetaData || doc.modMetaData || {}
+  const pick = (base, versionedKey) =&gt; {
+    const v = byVersion(m[versionedKey], major)
+    return v !== null ? v : liList(m[base])
+  }
+  const packageId = text(m.packageId)
+  return {
+    packageId,
+    name: text(m.name) || packageId,
+    author: text(m.author) || liList(m.authors).join(', ') || '',
+    url: text(m.url) || null,
+    description: text(m.description),
+    modVersion: text(m.modVersion) || null,
+    supportedVersions: liList(m.supportedVersions).map((v) =&gt; v.match(/\d+\.\d+/)?.[0] || v),
+    targetVersion: text(m.targetVersion) || null,   <span class="c">// legacy (pre-1.1) field</span>
+    loadAfter: pick('loadAfter', 'loadAfterByVersion'),
+    loadBefore: pick('loadBefore', 'loadBeforeByVersion'),
+    forceLoadAfter: liList(m.forceLoadAfter),
+    forceLoadBefore: liList(m.forceLoadBefore),
+    incompatibleWith: pick('incompatibleWith', 'incompatibleWithByVersion'),
+    modDependencies: depList(m.modDependencies, major, m.modDependenciesByVersion),
+    steamAppId: text(m.steamAppId) || null,
+  }
+}</code></pre>
+
+<p>几个值得注意的设计：</p>
+
+<div class="kv">
+  <div><span class="k">全部字段都给默认值</span><span class="v">每个字段后面都有 <code>|| ''</code> 或 <code>|| null</code> 或 <code>liList()</code>（空数组）。<b>绝不返回 undefined。</b>这让下游代码不用到处判空。</span></div>
+  <div><span class="k"><code>|| packageId</code></span><span class="v">没有 name 就用 packageId 当名字 —— 总得有个能显示的东西。</span></div>
+  <div><span class="k"><code>pick()</code> 闭包</span><span class="v">因为"优先用带版本号的字段，否则用普通字段"这件事要重复三次（loadAfter / loadBefore / incompatibleWith），所以抽成一个闭包。捕获了外层的 <code>m</code> 和 <code>major</code>。</span></div>
+  <div><span class="k"><code>.map((v) =&gt; v.match(/\d+\.\d+/)?.[0] || v)</code></span><span class="v">版本号统一成 <code>"1.6"</code> 格式。有人写 <code>"1.6"</code>，有人写 <code>"1.6.4871"</code>，提取前两段。</span></div>
+</div>
+
+<h3>带版本号的条件字段（RimWorld 1.4+ 的新玩法）</h3>
+
+<p>新版 RimWorld 允许 mod 针对不同游戏版本声明不同的规则：</p>
+
+<div class="filename">XML 长这样</div>
+<pre><code>&lt;loadAfterByVersion&gt;
+  &lt;v1.5&gt;&lt;li&gt;old.mod&lt;/li&gt;&lt;/v1.5&gt;
+  &lt;v1.6&gt;&lt;li&gt;new.mod&lt;/li&gt;&lt;/v1.6&gt;
+&lt;/loadAfterByVersion&gt;</code></pre>
+
+<div class="filename">src/host/xml.js:22-28</div>
+<pre><code>function byVersion(node, major) {
+  if (!node || typeof node !== 'object' || !major) return null
+  const key = 'v' + major
+  if (node[key] !== undefined) return liList(node[key])
+  return null
+}</code></pre>
+
+<p>注意它返回 <code>null</code> 而不是空数组 —— 这是刻意的：<code>pick()</code> 里用 <code>v !== null</code> 来判断"到底有没有这个版本的覆盖块"。如果返回 <code>[]</code>，就分不清"声明了但为空"和"根本没声明"了。</p>
+
+<div class="tip">
+  <b>这是个通用的设计原则</b>
+  <p>用 <code>null</code> 表示"没有这个信息"，用 <code>[]</code> / <code>''</code> 表示"有信息但是空的"。两者语义不同，不能混用。Python 里也常这么区分 <code>None</code> 和 <code>[]</code>。</p>
+</div>
+
+<h3>依赖列表的特殊处理</h3>
+
+<div class="filename">src/host/xml.js:31-43</div>
+<pre><code>function depList(node, major, versioned) {
+  let items = asArray(node &amp;&amp; node.li)
+  if (versioned &amp;&amp; typeof versioned === 'object' &amp;&amp; versioned['v' + major]) items = asArray(versioned['v' + major].li)
+  return items
+    .map((li) =&gt; (typeof li === 'object' ? li : { packageId: li }))
+    .map((li) =&gt; ({
+      packageId: text(li.packageId),
+      displayName: text(li.displayName) || text(li.packageId),
+      steamWorkshopUrl: text(li.steamWorkshopUrl) || null,
+      downloadUrl: text(li.downloadUrl) || null,
+    }))
+    .filter((d) =&gt; d.packageId)
+}</code></pre>
+
+<p>两种数据统一成一个形状：</p>
+
+<pre><code>&lt;!-- 老写法：只有一个 id --&gt;
+&lt;li&gt;brrainz.harmony&lt;/li&gt;
+
+&lt;!-- 新写法：带元信息的对象 --&gt;
+&lt;li&gt;
+  &lt;packageId&gt;brrainz.harmony&lt;/packageId&gt;
+  &lt;displayName&gt;Harmony&lt;/displayName&gt;
+  &lt;steamWorkshopUrl&gt;https://...&lt;/steamWorkshopUrl&gt;
+&lt;/li&gt;</code></pre>
+
+<p><code>.map((li) =&gt; (typeof li === 'object' ? li : { packageId: li }))</code> 把老写法"升级"成对象，之后统一处理。这个技巧叫 <b>normalize（规范化）</b>，非常常用。</p>
+
+<h2>写文件：ModsConfig.xml</h2>
+
+<p>读和写都在这个文件里。写只有一处，非常集中。</p>
+
+<div class="filename">src/host/xml.js:92-105</div>
+<pre><code>export function buildModsConfig({ version, activeMods, knownExpansions }) {
+  const lower = (a) =&gt; { const seen = new Set(); return (a || []).map(pid).filter((k) =&gt; k &amp;&amp; !seen.has(k) &amp;&amp; seen.add(k)) }
+  activeMods = lower(activeMods)
+  knownExpansions = lower(knownExpansions)
+  const builder = new XMLBuilder({ format: true, indentBy: '  ', suppressEmptyNode: false })
+  const body = builder.build({
+    ModsConfigData: {
+      version: version || '',
+      activeMods: { li: activeMods },
+      knownExpansions: { li: knownExpansions || [] },
+    },
+  })
+  return '&lt;?xml version="1.0" encoding="utf-8"?&gt;\n' + body
+}</code></pre>
+
+<div class="warn">
+  <b>这一行 <code>lower</code> 是个 JS 花活，值得拆开</b>
+  <pre><code>const lower = (a) =&gt; {
+  const seen = new Set()
+  return (a || []).map(pid).filter((k) =&gt; k &amp;&amp; !seen.has(k) &amp;&amp; seen.add(k))
+}</code></pre>
+  <p>它在做"转小写 + 去重"，但用了两个技巧：</p>
+  <ol>
+    <li><code>new Set()</code> 声明在函数体里，<code>filter</code> 的回调捕获它 —— 用闭包当"记忆"。</li>
+    <li><code>seen.add(k)</code> 返回 Set 本身（<b>truthy</b>），所以 <code>&amp;&amp; seen.add(k)</code> 既能执行副作用又返回真值。整个表达式 <code>!seen.has(k) &amp;&amp; seen.add(k)</code> 的语义是"没见过 → 记下来 → 返回真"。</li>
+  </ol>
+  <p>这行代码很聪明，但<b>不推荐模仿</b>。清晰写法是：</p>
+  <pre><code>const lower = (a) =&gt; {
+  const seen = new Set()
+  const out = []
+  for (const k of a || []) {
+    const v = pid(k)
+    if (v &amp;&amp; !seen.has(v)) { seen.add(v); out.push(v) }
+  }
+  return out
+}</code></pre>
+  <p>读别人的代码要能看懂花活，自己写时选清楚的。</p>
+</div>
+
+<h3>为什么必须写小写</h3>
+
+<div class="filename">src/host/service.js:345-348（writeConfig 里的注释）</div>
+<pre><code>// RimWorld compares ModsConfig ids case-sensitively against its lowercased packageIds:
+// writing "Ludeon.RimWorld" makes the game show a greyed duplicate in BOTH lists. Always lowercase.
+const seen = new Set()
+const ids = cfg.activeMods.map(pid).filter((k) =&gt; k &amp;&amp; !seen.has(k) &amp;&amp; seen.add(k))</code></pre>
+
+<p>这是踩过坑才写的注释。<b>如果你以后自己写 RimWorld 工具，这条一定要记住。</b></p>
+
+<h2>验证：跑一下真实扫描</h2>
+
+<p>这个项目自带一个手动检查脚本，直接跑就能看到扫描结果：</p>
+
+<div class="filename">scripts/scan.mjs（全文 17 行）</div>
+<pre><code>// Quick manual check: scan the local RimWorld install and print a summary.
+import { discoverPaths, readGameVersion } from '../src/host/paths.js'
+import { scanMods } from '../src/host/scan.js'
+
+const paths = await discoverPaths()
+const ver = await readGameVersion(paths.gameDir)
+console.log(paths, ver)
+const t = Date.now()
+const { mods, duplicates } = await scanMods({ ...paths, major: ver?.major })
+console.log('mods:', mods.length, 'in', Date.now() - t, 'ms', 'duplicates:', duplicates.length)
+const bySource = {}
+for (const m of mods) bySource[m.source] = (bySource[m.source] || 0) + 1
+console.log(bySource)
+console.log(mods.filter((m) =&gt; m.invalid).map((m) =&gt; [m.folder, m.invalid]))
+console.log(mods.slice(0, 8).map((m) =&gt; [m.key, m.name, m.kind, m.supportedVersions.join('/'), m.loadAfter.length, m.modDependencies.length]))
+const notSupported = mods.filter((m) =&gt; m.kind === 'mod' &amp;&amp; !m.supportedVersions.includes(ver?.major))
+console.log('not supporting', ver?.major, ':', notSupported.length, notSupported.slice(0, 5).map((m) =&gt; m.name))</code></pre>
+
+<div class="tip">
+  <b>这是个很好的学习工具</b>
+  <p>运行 <code>node scripts/scan.mjs</code>，你会看到自己电脑上所有 mod 的扫描结果。想验证你对 <code>parseAbout</code> 的理解，随便挑一个 mod 去看它的 About.xml，对照脚本输出。</p>
+  <p>注意 <code>.mjs</code> 后缀：因为项目的 <code>package.json</code> 声明了 <code>"type": "module"</code>，<code>.js</code> 已经是 ESM 了。脚本用 <code>.mjs</code> 是习惯，明确表示"这是要直接 node 跑的小脚本"。</p>
+</div>
+
+<h2>这一页的数据流总结</h2>
+
+<div class="tree">磁盘
+ ├─ &lt;Steam&gt;/steamapps/common/RimWorld/Data/        → source: 'official'
+ │    ├─ Core/About/About.xml                       → kind: 'core'
+ │    ├─ Royalty/About/About.xml                    → kind: 'expansion'
+ │    └─ ...
+ ├─ &lt;Steam&gt;/steamapps/common/RimWorld/Mods/        → source: 'local'
+ └─ &lt;Steam&gt;/steamapps/workshop/content/294100/&lt;id&gt;/ → source: 'workshop'
+      └─ 1234567890/About/About.xml                 → publishedFileId: '1234567890'
+
+                            ↓ scanMods()
+
+              found: [mod, mod, mod, ...]     全部（可能有重复）
+                            ↓ 按 rank 排序去重
+              byId: Map&lt;key, mod&gt;            干净的唯一集合 ★
+              duplicates: [{ key, paths }]    重复的报告
+                            ↓ service.js: state.catalog = r.byId
+              
+              state.catalog  ← 后面所有操作都吃这个</div>
+
+<div class="note">
+  <b>下一站</b>
+  <p>现在内存里有了一张干净的 <code>catalog</code>。看着 <code>About.xml</code> 里那些 <code>loadAfter</code> / <code>forceLoadBefore</code> / <code>modDependencies</code>，你大概已经猜到下一步了：<b>把它们变成一张图，然后排序。</b>这是整个项目的核心，也是下一整页的内容。</p>
+</div>
+
+<div class="pager">
+  <a href="02-entry.html"><span>上一页</span>← 2 · 入口 index.js</a>
+  <a href="04-sort.html" class="nx"><span>下一页</span>4 · 排序与诊断 →</a>
+</div>
+
+</main>
+</body>
+</html>

@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>2 · 入口 index.js · RimList 代码导读</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="side">
+  <div class="brand">
+    <b>RimList 代码导读</b>
+    <span>写给会一点 Python 的人</span>
+  </div>
+  <a href="index.html">0 · 先看这里</a>
+  <a href="01-js.html">1 · JS 速通</a>
+  <a href="02-entry.html" class="on">2 · 入口 index.js</a>
+  <a href="03-scan.html">3 · 扫描 mod</a>
+  <a href="04-sort.html">4 · 排序与诊断</a>
+  <a href="05-rules.html">5 · 规则库与列表</a>
+  <a href="06-service.html">6 · service.js</a>
+  <a href="07-client.html">7 · 前端 React</a>
+  <a href="08-hands-on.html">8 · 动手改与测试</a>
+  <div class="side-foot">
+    文件：<code>index.js</code>（685 行）<br>
+    这一页只看第 1–137 行和第 678–685 行。中间那一大坨工具定义，知道套路就行。
+  </div>
+</nav>
+
+<main>
+
+<div class="kicker">第 2 页 · 入口</div>
+
+<h1>
+  index.js：插件怎么活起来
+  <span class="sub">一个 DSH 插件本质上就是"导出一个 <code>apply</code> 函数"。这一页看它被调用时做了什么。</span>
+</h1>
+
+<div class="filename">index.js:1-13（文件开头的注释）</div>
+<pre><code>/**
+ * dsh-rimlist: RimWorld mod manager for DeepSeek Harness (host plugin).
+ *
+ * - Scans Core/DLC, local Mods/ and Steam Workshop mods.
+ * - Sorts with About.xml rules + RimSort Community Rules + Steam DB + user rules.
+ * - Diagnoses missing deps / version mismatches / incompatibilities.
+ * - Named mod lists: save, import (paste / URL), export, diff, apply.
+ * - Writes ModsConfig.xml with timestamped backups.
+ * - Browser API: POST /api/rimlist  { method, args }
+ * - Agent tools: rimlist_* (see TOOLS below).
+ *
+ * Data lives in $DSH_HOME/rimlist (not per-workspace: the game install is global).
+ */</code></pre>
+
+<div class="tip">
+  <b>先养成习惯：读文件头的注释</b>
+  <p>这个项目的每个文件开头都有一段这种"这一段代码干什么"的说明。作者写得很实在，五分钟读完全部文件头，你就有了整个项目的骨架。这是效率最高的第一步。</p>
+</div>
+
+<h2>插件的骨架：三个导出</h2>
+
+<div class="filename">index.js:21-26</div>
+<pre><code>export const name = 'dsh-rimlist'
+export const inject = ['tools']
+
+const isObj = (v) =&gt; typeof v === 'object' &amp;&amp; v !== null &amp;&amp; !Array.isArray(v)
+
+export function apply(ctx) {</code></pre>
+
+<table>
+  <thead><tr><th>导出</th><th>作用</th><th>Python 类比</th></tr></thead>
+  <tbody>
+    <tr><td><code>name</code></td><td>插件名，DSH 用它标识</td><td>模块常量</td></tr>
+    <tr><td><code>inject</code></td><td>声明"我需要宿主提供 tools 服务"。DSH 在调用 <code>apply</code> 前会保证这个服务可用</td><td>有点像 <code>__init__.py</code> 里声明的依赖，或者是依赖注入框架的注解</td></tr>
+    <tr><td><code>apply(ctx)</code></td><td><b>主入口。</b><code>ctx</code> 是宿主给的上下文对象，用来获取服务和注册东西</td><td>类似 <code>def setup(app):</code></td></tr>
+  </tbody>
+</table>
+
+<h3><code>ctx</code> 是什么</h3>
+
+<p>它是一个"服务容器"。全文出现了这么几种用法，看到就知道在干嘛：</p>
+
+<table>
+  <thead><tr><th>代码</th><th>含义</th></tr></thead>
+  <tbody>
+    <tr><td><code>ctx.get('webServer')</code></td><td>取出 HTTP 服务（拿到才能注册路由）。没装就是 <code>undefined</code></td></tr>
+    <tr><td><code>ctx.get('timer')</code></td><td>取出定时器服务（用来重试）</td></tr>
+    <tr><td><code>ctx.tools.register(tool)</code></td><td>注册一个 AI 工具</td></tr>
+    <tr><td><code>ctx.inject(['sidebarRightTabs'], cb)</code></td><td>（前端）等某个服务就绪后执行回调</td></tr>
+  </tbody>
+</table>
+
+<h3>为什么用 <code>ctx.get</code> 而不是直接 import</h3>
+
+<p>因为插件和宿主是<b>分开打包</b>的。插件不能 <code>import</code> 宿主代码，只能从 <code>ctx</code> 里"要"。这样宿主可以换实现，插件不用改。</p>
+
+<h2>启动流程，按执行顺序</h2>
+
+<div class="flow">apply(ctx) 被 DSH 调用
+   │
+   ├─ ① 算出数据目录 <span style="color:#8a7f70">dshHome/rimlist</span>
+   ├─ ② createService({ dataDir, log })       ← 创建服务对象（同步、很快）
+   ├─ ③ service.init()  ← 不 await！后台跑     ← 读设置、扫描磁盘、加载规则库
+   ├─ ④ 定义 httpHandler                       ← 只是个函数，还没生效
+   ├─ ⑤ registerRoute()                        ← 真正把 /api/rimlist 挂上去
+   ├─ ⑥ 如果没拿到 webServer，开一个定时器重试
+   ├─ ⑦ 定义 31 个 AI 工具
+   ├─ ⑧ ctx.tools.register(tool) × 31
+   └─ ⑨ return 一个清理函数                     ← 插件卸载时调用</div>
+
+<div class="note">
+  <b>注意 ③ 里的"不 await"</b>
+  <p>扫描磁盘可能要几秒钟（几百个 mod 文件夹）。如果这里 <code>await</code>，整个 DSH 启动就会卡住。所以它在后台跑，界面上先显示"正在扫描 RimWorld…"。这是一个很典型的性能取舍。</p>
+</div>
+
+<h2>①–③ 创建服务</h2>
+
+<div class="filename">index.js:26-34</div>
+<pre><code>export function apply(ctx) {
+  const dshHome = process.env.DSH_HOME || path.join(homedir(), '.dsh')
+  const dataDir = path.join(dshHome, 'rimlist')
+  const log = (m) =&gt; console.log('dsh-rimlist: ' + m)
+  const service = createService({ dataDir, log })
+  service.init().then(
+    () =&gt; log(`ready: ${service.state.mods.length} mods, ${service.activeKeys().length} active, game ${service.state.game?.full || 'not found'}`),
+    (e) =&gt; log('init failed: ' + (e &amp;&amp; e.message)),
+  )</code></pre>
+
+<p>几个细节值得学：</p>
+
+<div class="kv">
+  <div><span class="k">数据目录</span><span class="v"><code>~/.dsh/rimlist</code>。注释解释了原因：<b>游戏装在电脑上，是全局的，不属于某个工作区</b>，所以数据不放在工作区目录里。</span></div>
+  <div><span class="k"><code>|| homedir()</code></span><span class="v">环境变量优先，没设就用默认。<code>process.env</code> 就是 <code>os.environ</code>。</span></div>
+  <div><span class="k"><code>log</code> 是闭包</span><span class="v">把 <code>console.log</code> 包一层加前缀，传给 service。service 内部不需要知道前缀，全都用 <code>log(...)</code>。这是<b>依赖注入</b>的朴素版本。</span></div>
+  <div><span class="k"><code>init().then(成功, 失败)</code></span><span class="v">两个回调都传，成功和失败都不会抛异常出去。失败只打日志 —— 插件坏掉不该拖垮整个 DSH。</span></div>
+</div>
+
+<h2>④ 一个手写的 HTTP 处理器</h2>
+
+<p>这是后端唯一对外的接口。整个项目就靠它服务前端和 AI 工具。</p>
+
+<div class="filename">index.js:36-51</div>
+<pre><code>const MAX_BODY = 4 * 1024 * 1024
+const sendJson = (res, status, value) =&gt; {
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
+  res.end(JSON.stringify(value))
+}
+const sameOrigin = (req) =&gt; {
+  const origin = req.headers?.origin
+  const host = req.headers?.host
+  if (!origin || !host) return true
+  try {
+    return new URL(origin).host === host
+  } catch {
+    return false
+  }
+}</code></pre>
+
+<p>没有用 Express 之类的框架，直接操作 Node 原生的 <code>req</code> / <code>res</code>。两个函数都很小：</p>
+
+<ul>
+  <li><code>sendJson</code>：设状态码和 content-type，序列化后发送。等价于 Flask 的 <code>return jsonify(x), status</code>。</li>
+  <li><code>sameOrigin</code>：<b>安全检查。</b>只允许同一个站点发来的请求，防止别的网页偷偷调用你的本地接口改 mod 顺序。</li>
+</ul>
+
+<div class="tip">
+  <b><code>sameOrigin</code> 的逻辑值得细看</b>
+  <p><code>if (!origin || !host) return true</code> —— 没有 <code>Origin</code> 头就放行。因为非浏览器客户端（比如 curl、DSH 自己的内部调用）不会带这个头。浏览器跨站请求一定会带，所以这道防线只挡浏览器。</p>
+</div>
+
+<h3>主处理函数</h3>
+
+<div class="filename">index.js:52-84</div>
+<pre><code>const httpHandler = async (req, res) =&gt; {
+  try {
+    const url = new URL(req.url, 'http://x')
+    <span class="c">// Preview images: GET /api/rimlist/preview?id=&lt;packageId&gt;</span>
+    if (req.method === 'GET' &amp;&amp; url.pathname.endsWith('/preview')) {
+      const p = await service.dispatch('previewPath', { packageId: url.searchParams.get('id') || '' })
+      if (!p) return sendJson(res, 404, { error: 'no preview' })
+      const s = await stat(p)
+      res.writeHead(200, { 'content-type': p.endsWith('.jpg') ? 'image/jpeg' : 'image/png', ... })
+      createReadStream(p).pipe(res)
+      return
+    }
+    if (req.method !== 'POST') return sendJson(res, 405, { error: 'Method not allowed' })
+    if (!sameOrigin(req)) return sendJson(res, 403, { error: 'Cross-origin request denied' })
+    const ct = String(req.headers['content-type'] || '').toLowerCase()
+    if (!ct.startsWith('application/json')) return sendJson(res, 415, { error: 'Expected application/json' })
+    const chunks = []
+    let size = 0
+    for await (const chunk of req) {
+      size += chunk.length
+      if (size &gt; MAX_BODY) return sendJson(res, 413, { error: 'Request body too large' })
+      chunks.push(chunk)
+    }
+    const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {}
+    const method = typeof body.method === 'string' ? body.method : 'snapshot'
+    const args = isObj(body.args) ? body.args : {}
+    const result = await service.dispatch(method, args)
+    return sendJson(res, 200, { ok: true, result })
+  } catch (err) {
+    const status = err instanceof SyntaxError ? 400 : 500
+    return sendJson(res, status, { ok: false, error: String((err &amp;&amp; err.message) || err) })
+  }
+}</code></pre>
+
+<p>这个函数值得逐段读，因为它包含了后端所有的"防御性编程"套路：</p>
+
+<ol class="steps">
+  <li>
+    <b>先处理特例：预览图</b><br>
+    GET <code>/api/rimlist/preview?id=xxx</code> 直接返回图片文件流。这是唯一的 GET 接口，其他的都是 POST。
+  </li>
+  <li>
+    <b>三道校验，每道都提前 return</b><br>
+    不是 POST → 405；跨源 → 403；不是 JSON → 415。<b>错误在最早的地方返回，后面的代码就不用操心了。</b>这个风格叫"guard clause"（卫语句），比层层嵌套 if 好读得多。
+  </li>
+  <li>
+    <b>手动读 body，边读边限长</b><br>
+    <code>for await (const chunk of req)</code> 一块块读（Node 的流）。每读到一块就累加长度，超过 4 MB 立刻返回 413。<b>不是读完才检查</b> —— 否则恶意请求可以用 1 GB 打爆内存。
+  </li>
+  <li>
+    <b>容错解析</b><br>
+    <code>body.method</code> 不是字符串就用 <code>'snapshot'</code>（默认就是"给我全部状态"）；<code>body.args</code> 不是对象就空对象。前端传错也不会崩。
+  </li>
+  <li>
+    <b>一行分发</b><br>
+    <code>service.dispatch(method, args)</code> —— 这里没有 if/else 大列表，因为真正的分派在 service.js 里（第 6 页）。<b>入口只负责 HTTP，业务逻辑全在 service。</b>
+  </li>
+  <li>
+    <b>统一异常出口</b><br>
+    整个函数体包在 try/catch 里。<code>SyntaxError</code>（JSON 解析失败）返回 400，其他都返回 500。<b>永远给前端一个 JSON，不会挂在那里不响应。</b>
+  </li>
+</ol>
+
+<div class="warn">
+  <b>第 3 步的一个语法点</b>
+  <p><code>for await (const chunk of req)</code> —— 这是"异步迭代"，Python 里对应 <code>async for chunk in req</code>。只用于流这类"数据会陆续到来"的对象。</p>
+</div>
+
+<h2>⑤ 注册路由，以及为什么需要重试</h2>
+
+<div class="filename">index.js:86-113</div>
+<pre><code>const routeState = { registered: false, timer: null, dispose: null, disposed: false, attempts: 0 }
+const registerRoute = () =&gt; {
+  if (routeState.registered || routeState.disposed) return
+  const webServer = ctx.get('webServer')
+  if (webServer === undefined) return
+  try {
+    const dispose = webServer.register({ kind: 'prefix', path: '/api/rimlist', handler: httpHandler })
+    routeState.dispose = typeof dispose === 'function' ? dispose : null
+    routeState.registered = true
+    log('/api/rimlist route registered')
+  } catch (err) {
+    log('route registration failed: ' + ((err &amp;&amp; err.message) || err))
+  }
+}
+registerRoute()
+if (!routeState.registered) {
+  const timer = ctx.get('timer')
+  if (timer) {
+    routeState.timer = timer.interval(() =&gt; {
+      routeState.attempts++
+      registerRoute()
+      if (routeState.registered || routeState.attempts &gt;= 40) {
+        if (routeState.timer) routeState.timer()
+        routeState.timer = null
+      }
+    }, 500)
+  }
+}</code></pre>
+
+<p><b>为什么不能直接注册？</b>因为 DSH 加载插件的顺序不保证 <code>webServer</code> 已经就绪。可能插件先加载，HTTP 服务器后起来。所以：</p>
+
+<ol>
+  <li>先试一次（<code>registerRoute()</code>）</li>
+  <li>没成功就每 500 ms 再试，最多 40 次（20 秒）</li>
+  <li>成功或超时就停掉定时器</li>
+</ol>
+
+<p>这 5 个字段的 <code>routeState</code> 是在管理这个"重试状态机"。写得很啰嗦但很稳。</p>
+
+<div class="note">
+  <b>为什么要检查 <code>disposed</code></b>
+  <p>因为定时器可能在插件卸载之后才触发。那时再去注册路由就会出错。<code>disposed</code> 标志位让回调能知道"我已经死了，别干活"。</p>
+</div>
+
+<h2>⑦ 31 个 AI 工具：套路完全一样</h2>
+
+<p>从第 138 行到 677 行，540 行代码定义的都是同一件事：<b>让 AI 能调用这个插件的能力</b>。</p>
+
+<div class="filename">index.js:139-158（第一个工具，作为模板）</div>
+<pre><code>{
+  name: 'rimlist_status',
+  description: 'RimWorld mod manager overview: game version, paths, ...',
+  parameters: { type: 'object', properties: {} },
+  output: textOut((v) =&gt; {
+    if (!v.ok) return 'Error: ' + v.error
+    const s = v
+    const lines = [
+      `RimWorld ${s.game?.full || 'NOT FOUND'} · ${s.mods.length} mods installed ...`,
+      ...
+    ]
+    return lines.join('\n')
+  }),
+  async execute() {
+    return run('snapshot', {})
+  },
+}</code></pre>
+
+<p>每个工具都是这个形状，五个字段：</p>
+
+<table>
+  <thead><tr><th>字段</th><th>作用</th><th>给谁看</th></tr></thead>
+  <tbody>
+    <tr><td><code>name</code></td><td>工具名，AI 用它调用。都以 <code>rimlist_</code> 开头</td><td>AI</td></tr>
+    <tr><td><code>description</code></td><td>一段英文说明"这个工具干什么、什么时候该用"</td><td><b>AI 看这个决定要不要用</b></td></tr>
+    <tr><td><code>parameters</code></td><td>JSON Schema，描述参数类型和取值</td><td>AI + 校验</td></tr>
+    <tr><td><code>output</code></td><td><code>textOut(fn)</code>：把 JSON 结果格式化成人类可读文本</td><td>你（在对话里）</td></tr>
+    <tr><td><code>execute(args)</code></td><td>真正干活，返回 JSON</td><td>—</td></tr>
+  </tbody>
+</table>
+
+<div class="tip">
+  <b>关键洞察：<code>output</code> 和 <code>execute</code> 是分开的</b>
+  <p><code>execute</code> 返回<b>纯数据</b>（JSON），<code>output</code> 负责把它变成<b>可读文本</b>。同一个数据可以有两种展示。</p>
+  <p>为什么要分开？因为数据要能再次被程序处理（存文件、给别的工具用），而文本只给人看。混在一起就麻烦了。这是个很好的设计习惯。</p>
+</div>
+
+<h3><code>run()</code> 和 <code>textOut()</code> 两个辅助函数</h3>
+
+<div class="filename">index.js:116-128</div>
+<pre><code>const textOut = (fn) =&gt; ({
+  schema: { type: 'object', additionalProperties: true },
+  render: (args, value) =&gt; [{ type: 'text', text: fn(value) }],
+})
+const run = async (method, args) =&gt; {
+  try {
+    <span class="c">// JSON round-trip: drops undefined / Sets / Maps so the host gets lossless JSON.</span>
+    return JSON.parse(JSON.stringify({ ok: true, ...(await wrapResult(await service.dispatch(method, args))) }))
+  } catch (err) {
+    return { ok: false, error: String((err &amp;&amp; err.message) || err) }
+  }
+}
+const wrapResult = async (r) =&gt; (isObj(r) ? r : { result: r })</code></pre>
+
+<p>这两个是<b>所有工具共用的样板</b>，理解它们就等于理解了 31 个工具：</p>
+
+<div class="kv">
+  <div><span class="k"><code>textOut(fn)</code></span><span class="v">收一个格式化函数，返回工具的输出描述对象。每个工具定义里那一大段 <code>textOut((v) =&gt; {...})</code> 就是在写这个 <code>fn</code>。</span></div>
+  <div><span class="k"><code>run(method, args)</code></span><span class="v">调 service 并把结果包装成 <code>{ ok: true, ...结果 }</code>。<b>永远不抛异常</b> —— 出错就返回 <code>{ ok: false, error }</code>。这样 AI 能读懂错误。</span></div>
+  <div><span class="k"><code>wrapResult</code></span><span class="v">如果 service 返回的不是对象（比如一个数组），包成 <code>{ result: [...] }</code>，保证展开运算符 <code>...</code> 不出错。</span></div>
+  <div><span class="k">JSON round-trip</span><span class="v">丢掉 <code>undefined</code>、<code>Map</code>、<code>Set</code>。因为工具结果最终要变成 JSON 文本传给 AI，这些东西没法序列化。</span></div>
+</div>
+
+<h3>看到一个带参数的工具长什么样</h3>
+
+<div class="filename">index.js:190-215（rimlist_mod，略去长 description）</div>
+<pre><code>{
+  name: 'rimlist_mod',
+  description: 'Full details of one installed mod: ...',
+  parameters: { type: 'object', properties: { packageId: { type: 'string' } }, required: ['packageId'] },
+  output: textOut((v) =&gt; {
+    if (!v.ok) return 'Error: ' + v.error
+    const m = v.result !== undefined ? v.result : v.packageId ? v : null
+    if (!m) return 'Not installed'
+    return [
+      `${m.name} (${m.packageId}) by ${m.author || '?'} · ${m.kind}/${m.source} ...`,
+      `Path: ${m.path}`,
+      m.dependsOn.length ? 'Depends on: ' + m.dependsOn.map((d) =&gt; `${d.name} (${d.packageId})`).join(', ') : '',
+      ...
+    ].filter(Boolean).join('\n')
+  }),
+  async execute(args) {
+    return run('mod', args)
+  },
+}</code></pre>
+
+<p>注意最后那个 <code>.filter(Boolean)</code> —— 用来去掉空字符串。这是"可选行"的常用技巧：构建时先塞空串占位，最后统一滤掉。</p>
+
+<h2>⑧ 注册与 ⑨ 清理</h2>
+
+<div class="filename">index.js:678-685</div>
+<pre><code>  for (const tool of tools) ctx.tools.register(tool)
+
+  return () =&gt; {
+    routeState.disposed = true
+    if (routeState.timer) routeState.timer()
+    if (routeState.dispose) routeState.dispose()
+  }
+}</code></pre>
+
+<p><code>apply</code> 返回一个<b>清理函数</b>。DSH 卸载插件（或退出）时会调用它，把定时器停掉、路由撤掉。这是 JavaScript 里"资源释放"的标准模式 —— 相当于 Python 的 <code>__exit__</code> 或 <code>atexit</code>，但更局部。</p>
+
+<div class="tip">
+  <b>为什么返回函数而不是用 <code>try/finally</code></b>
+  <p>因为插件的生命周期比一次函数调用长得多。<code>apply</code> 早返回了，插件还在跑。只能约定"你返回一个函数，我到时候调它"。</p>
+</div>
+
+<h2>前后端怎么接上：<code>cordis.patch.yml</code></h2>
+
+<div class="filename">cordis.patch.yml（全文 5 行）</div>
+<pre><code># Insert the rimlist plugin into the profile composition.
+# Layer order: @deepseek-ai/dsh-base -&gt; this bundle -&gt; profile cordis.patch.yml -&gt; user --patch overrides.
+- insert:
+    - id: dsh-rimlist
+      name: "dsh-rimlist"</code></pre>
+
+<p>这是 DSH 的插件装配清单。意思就是"把我插进配置里"。<code>package.json</code> 里的 <code>dsh</code> 字段指定了这个文件：</p>
+
+<div class="filename">package.json:48-61</div>
+<pre><code>"dsh": {
+  "bundle": {
+    "patch": "./cordis.patch.yml"
+  },
+  "client": {
+    "platform": "web",
+    "inject": [
+      "@deepseek-ai/dsh-client-locale",
+      "@deepseek-ai/dsh-client-ui-slots",
+      "@deepseek-ai/dsh-client-ui-conversation",
+      "@deepseek-ai/dsh-client-ui-session"
+    ]
+  }
+}</code></pre>
+
+<p>两个关键点：</p>
+<ul>
+  <li><code>bundle.patch</code>：后端怎么装（插进 cordis 组合）</li>
+  <li><code>client</code>：前端代码在哪、依赖宿主哪些包。<code>platform: "web"</code> 表示只在网页界面加载。</li>
+</ul>
+
+<p><code>"exports"</code> 里的 <code>"./client": "./lib/client.js"</code> 就是告诉 DSH："前端代码在这个文件里"。</p>
+
+<h2>build.mjs：前端为什么需要打包</h2>
+
+<p>后端代码 Node.js 能直接跑（虽然用了 <code>import</code>，但 <code>package.json</code> 里声明了 <code>"type": "module"</code>）。<b>前端不行</b> —— 浏览器不认识 JSX，也不认识 <code>import './styles.css'</code>。</p>
+
+<div class="filename">build.mjs:18-42（核心配置）</div>
+<pre><code>const result = await esbuild.build({
+  entryPoints: [resolve(root, 'src/client/entry.jsx')],
+  bundle: true,
+  outfile: resolve(root, 'dist/app.cjs'),
+  format: 'cjs',
+  platform: 'browser',
+  jsx: 'automatic',
+  jsxImportSource: 'react',
+  target: ['es2020'],
+  minify,
+  external: ['react', 'react-dom', 'react/jsx-runtime', 'react/jsx-dev-runtime', 'react-dom/client'],
+  plugins: [
+    {
+      name: 'inline-css',
+      setup(build) {
+        build.onLoad({ filter: /\.css$/ }, (args) =&gt; ({
+          contents: readFileSync(args.path, 'utf8'),
+          loader: 'text',
+        }))
+      },
+    },
+  ],
+})</code></pre>
+
+<table>
+  <thead><tr><th>选项</th><th>意思</th></tr></thead>
+  <tbody>
+    <tr><td><code>entryPoints</code></td><td>从哪开始。esbuild 会顺着 <code>import</code> 自动找到所有依赖文件</td></tr>
+    <tr><td><code>bundle</code></td><td>把几十个文件打成<b>一个</b>文件</td></tr>
+    <tr><td><code>jsx: 'automatic'</code></td><td>把 <code>&lt;div&gt;</code> 编译成 <code>jsx()</code> 调用（第 7 页讲）</td></tr>
+    <tr><td><code>external</code></td><td>React 不打包进去，运行时从宿主拿（宿主已经有一份 React 了，重复打包会冲突）</td></tr>
+    <tr><td><code>inline-css</code> 插件</td><td>遇到 <code>.css</code> 文件时不要解析，直接当字符串读进来</td></tr>
+  </tbody>
+</table>
+
+<p>然后是把产物包一层壳：</p>
+
+<div class="filename">build.mjs:48-60</div>
+<pre><code>const app = readFileSync(resolve(root, 'dist/app.cjs'), 'utf8')
+const wrapped = [
+  'window.__ModuleLoader__.load({',
+  `  id: ${JSON.stringify(moduleId)},`,
+  '  factory: function (require) {',
+  '    var module = { exports: {} }',
+  '    var exports = module.exports',
+  app,
+  '    return (module.exports &amp;&amp; module.exports.default) || module.exports',
+  '  },',
+  '})',
+].join('\n')
+writeFileSync(resolve(root, 'lib/client.js'), wrapped)</code></pre>
+
+<p>这段是把一个 CommonJS 模块手工模拟出来（<code>module</code> / <code>exports</code> 是 CJS 的老约定），再交给 DSH 的模块加载器。<b>你不需要改这段</b>，只要知道 "<code>lib/client.js</code> 是生成物，改了会被覆盖"。</p>
+
+<div class="warn">
+  <b>别手改 <code>lib/client.js</code></b>
+  <p>它是 <code>pnpm build</code> 从 <code>src/client/</code> 生成的。改源码然后重新 build 才对。同理 <code>dist/</code> 也是中间产物。</p>
+</div>
+
+<h2>index.js 全貌一览</h2>
+
+<div class="tree">index.js
+├─ 1-13     文件头注释（项目功能清单）
+├─ 14-19    import：path / os / fs / service / classify
+├─ 21-22    export name / inject
+├─ 24        小工具 isObj
+├─ 26-34    apply() 开始：数据目录、建 service、后台 init
+├─ 36-51    HTTP 小工具：sendJson、sameOrigin
+├─ 52-84    httpHandler：校验 + 读 body + dispatch
+├─ 86-113   路由注册 + 重试机制
+├─ 116-136  工具辅助：textOut / run / wrapResult / nameOf / fmtIssues
+├─ 138-677  31 个 AI 工具定义（套路统一）
+├─ 678      注册所有工具
+└─ 680-685  返回清理函数</div>
+
+<div class="note">
+  <b>这一页的收获</b>
+  <p>你知道了：插件 = 导出 <code>apply</code>；<code>apply</code> 做三件事（建服务、挂路由、注册工具）；后端唯一入口是 <code>service.dispatch(method, args)</code>。</p>
+  <p>下一件事就是搞清楚 <code>dispatch</code> 背后到底有什么。但先得知道数据从哪来 —— 所以下一页先讲扫描。</p>
+</div>
+
+<div class="pager">
+  <a href="01-js.html"><span>上一页</span>← 1 · JS 速通</a>
+  <a href="03-scan.html" class="nx"><span>下一页</span>3 · 扫描 mod →</a>
+</div>
+
+</main>
+</body>
+</html>

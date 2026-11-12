@@ -1,0 +1,5 @@
+# Insert the rimlist plugin into the profile composition.
+# Layer order: @deepseek-ai/dsh-base -> this bundle -> profile cordis.patch.yml -> user --patch overrides.
+- insert:
+    - id: dsh-rimlist
+      name: "dsh-rimlist"
